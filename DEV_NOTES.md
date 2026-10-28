@@ -5,18 +5,30 @@ release; the scripts live in `PythonAPI/examples/` and are copied next to the
 release to run.
 
 ```
-python manual_control_driver.py --res 1280x720
+python manual_control_driver.py
 ```
 
 ## New features
 
 **Driver's-seat manual control** (`manual_control_driver.py`)
-- Starts in a driver's-eye camera; Backspace cycles the Lincoln MKZ, Dodge
-  Charger, Nissan Patrol, Ford taxi and Mini Cooper, each with a tuned eye.
+- Starts in a driver's-eye camera, full screen (borderless) on the primary
+  monitor; `--windowed` gives a window of `--res`. Backspace cycles the
+  Lincoln MKZ, Dodge Charger, Nissan Patrol, Ford taxi and Mini Cooper, each
+  with a tuned eye.
+
+**Drive modes and regen**
+- Eco / Normal (default) / Sport on the paddles: left = down, right = up.
+  Eco caps the throttle at 60% with a soft start and makes the force feedback
+  40% lighter; Sport sharpens the throttle.
+- Regenerative braking Off / Low / Medium / Maximum, set by the mode (Eco
+  Maximum, Normal Low, Sport Off) and adjusted with the wheel's top buttons
+  (left down, right up). CARLA has no regen, so it is brake on lift-off:
+  0.12 / 0.25 / 0.5 (about 0.5 g), easing off below 13 km/h; none in N or P.
 
 **Second-screen dashboard** (`smart_manual_dashboard/`)
 - Opens full screen on monitor 2 (Edge/Chrome app window, local server,
-  server-sent events). Shows live speed; the other panels still show defaults.
+  server-sent events). Shows live speed, gear, drive mode, regen, throttle
+  (applied vs pedal) and brake; the assist and tip panels still show defaults.
 - `--no-dashboard`, `--dashboard-monitor N`, `--dashboard-port P`;
   `python -m smart_manual_dashboard` runs it without CARLA.
 
@@ -38,9 +50,9 @@ python manual_control_driver.py --res 1280x720
 
 ## Known gaps
 
-- Dashboard only gets speed so far: nearby vehicles, feature prompts and
-  driver profile are still to wire up.
-- Wheel buttons are not mapped yet.
+- Dashboard: nearby vehicles, assists, feature prompts and driver profile
+  are still to wire up.
+- The shifter unit's own buttons and d-pad are not mapped yet.
 - If the Traffic Manager fails with a bind error, Windows has reserved port
   8000: pass `--tm-port 8010`.
 - Close the drive window with Esc, not by killing it: destroying a car while
