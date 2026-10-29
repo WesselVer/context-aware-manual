@@ -25,12 +25,34 @@ python manual_control_driver.py
   (left down, right up). CARLA has no regen, so it is brake on lift-off:
   0.12 / 0.25 / 0.5 (about 0.5 g), easing off below 13 km/h; none in N or P.
 
+**Cruise control** (plain, not adaptive)
+- G25 buttons: 15 on/off, 18 +5, 16 -5, 17 resume. On/off engages at the
+  current speed (from 20 km/h, in D) and off forgets the set speed. + and -
+  step to the next 5 km/h (47 goes to 50 or 45); on standby they set the
+  current speed. Resume returns to the last set speed.
+- Throttle only, from a PI loop: it never brakes, so it overshoots downhill.
+  The throttle pedal overrides it; braking, the clutch, the hand brake,
+  leaving D or autopilot cancels it to standby. No regen while it holds.
+
 **Second-screen dashboard** (`smart_manual_dashboard/`)
 - Opens full screen on monitor 2 (Edge/Chrome app window, local server,
   server-sent events). Shows live speed, gear, drive mode, regen, throttle
-  (applied vs pedal) and brake; the assist and tip panels still show defaults.
+  (applied vs pedal), brake and cruise control; the adaptive-cruise,
+  autopilot and tip panels still show defaults.
 - `--no-dashboard`, `--dashboard-monitor N`, `--dashboard-port P`;
   `python -m smart_manual_dashboard` runs it without CARLA.
+
+**Manual tips** (`smart_manual_dashboard/tips.py`)
+- A tip slides into the bottom panel with a soft two-note chime (Web Audio,
+  no sound file; the browser starts with autoplay allowed) and a glow that
+  settles. It outlines the dashboard zones it names (`highlight`) with a
+  pulsing ring and a TIP tag, and loops a drawing of the movement to make
+  (`gesture`).
+- One test tip so far: above 100 km/h, "lift your foot off the
+  accelerator", outlining the speed and the throttle bar. It stays at least
+  4 s and clears below 97 km/h.
+- Zones: speed, throttle, brake, gear, cruise, driveMode, regen. Gestures:
+  release-throttle only; button gestures (drive modes and so on) come next.
 
 **Logitech G25 wheel with force feedback** (`steering_wheel.py`)
 - Steering, throttle, brake and clutch; the keyboard keeps working beside it.
@@ -50,9 +72,11 @@ python manual_control_driver.py
 
 ## Known gaps
 
-- Dashboard: nearby vehicles, assists, feature prompts and driver profile
-  are still to wire up.
-- The shifter unit's own buttons and d-pad are not mapped yet.
+- Dashboard: nearby vehicles, adaptive cruise, autopilot, the driver
+  profile and real tips (beyond the test tip) are still to wire up. The tip
+  panel's Dismiss and Turn tips off buttons are gone until there is input
+  for them.
+- The d-pad and the other shifter-unit buttons are not mapped yet.
 - If the Traffic Manager fails with a bind error, Windows has reserved port
   8000: pass `--tm-port 8010`.
 - Close the drive window with Esc, not by killing it: destroying a car while
