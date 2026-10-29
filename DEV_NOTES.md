@@ -31,8 +31,40 @@ python manual_control_driver.py
   step to the next 5 km/h (47 goes to 50 or 45); on standby they set the
   current speed. Resume returns to the last set speed.
 - Throttle only, from a PI loop: it never brakes, so it overshoots downhill.
+  A short press of on/off; a long press is ACC, below.
   The throttle pedal overrides it; braking, the clutch, the hand brake,
   leaving D or autopilot cancels it to standby. No regen while it holds.
+
+**Adaptive cruise control (ACC)**
+- Long press (0.6 s) of on/off (15); a short press turns either cruise off.
+  Gap buttons: 1 gap -, 2 gap +, time gaps 1.0 / 1.5 / 2.0 / 2.5 s, gap 2
+  to start; keeps 5 m at a standstill.
+- Set speed to start: the road's limit from `vehicle.get_speed_limit()`,
+  which follows the speed signs. Town10HD has none, so it is CARLA's 30 km/h
+  default everywhere there (its OpenDRIVE says 40 mph on most roads, which
+  nothing in CARLA reads).
+- The car ahead: the nearest vehicle on the ego lane's waypoints up to 100 m
+  (straightest way through junctions), checked 20 times a second. It brakes
+  to keep the gap and stops behind a stopped car; after 3 s stopped it waits
+  for resume or the throttle. Engages from 20 km/h, or slower with a car ahead.
+- Traffic: `generate_traffic.py --asynch --tm-port 8010` from the release's
+  `PythonAPI/examples`. Without `--asynch` it puts the server into
+  synchronous mode, and killing it leaves the server there, frozen.
+
+**Autopilot**
+- G25 button 0 (or P) toggles it, in D only. The Traffic Manager drives the
+  car around the map at random: 30 km/h to start (+5/-5, 10 to 90 km/h), the
+  following distance from the ACC gap buttons (5 m + time gap x speed), Eco
+  while it drives. The wheel turns with the car through the FFB spring.
+- Takeover: the brake pedal past 10%, the shifter out of D, or the wheel held
+  40 degrees off the car's steering for 0.25 s without coming back (the
+  spring resists until then). The drive mode from before comes back.
+- The dashboard's autopilot card shows DRIVING and pulses.
+
+**Assist chimes** (dashboard, Web Audio)
+- ACC on: two rising triangle notes; ACC off or to standby: the same
+  falling. Autopilot on: four rising sine notes; off: four falling sine
+  notes ending on a held low one with its octave below, to be noticed. Plain cruise is silent.
 
 **Second-screen dashboard** (`smart_manual_dashboard/`)
 - Opens full screen on monitor 2 (Edge/Chrome app window, local server,
@@ -72,7 +104,7 @@ python manual_control_driver.py
 
 ## Known gaps
 
-- Dashboard: nearby vehicles, adaptive cruise, autopilot, the driver
+- Dashboard: nearby vehicles, the driver
   profile and real tips (beyond the test tip) are still to wire up. The tip
   panel's Dismiss and Turn tips off buttons are gone until there is input
   for them.
