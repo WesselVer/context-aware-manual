@@ -9,10 +9,54 @@
 """Allows controlling a vehicle with a keyboard, seen from the driver's seat.
 
 manual_control.py from the CARLA 0.10.0 release, changed to start in a
-driver's-eye camera. Backspace cycles the cars in DRIVER_EYES (Lincoln MKZ,
+driver's-eye camera, full screen on the primary monitor (--windowed for a
+window of --res). Backspace cycles the cars in DRIVER_EYES (Lincoln MKZ,
 Dodge Charger, Nissan Patrol, Ford taxi, Mini Cooper), each with a tuned eye
 position; Tab cycles the camera views. Pass --filter for the original
 random-car behaviour.
+
+A second window opens with the smart-manual dashboard (smart_manual_dashboard/),
+full screen on the second monitor, showing the car's speed. --no-dashboard
+turns it off.
+
+A Logitech G25 wheel, when plugged in, drives the car (steering, throttle,
+brake, clutch) with force feedback (steering_wheel.py); the keyboard keeps
+working beside it. --wheel picks another wheel by name, --no-wheel ignores it.
+CARLA has no clutch, so pressing it disengages the throttle. The H-shifter is
+an automatic's selector: 1st P, 3rd D, 4th R, anywhere else N.
+
+Drive modes Eco, Normal (the default) and Sport shape the throttle; the left
+paddle steps down, the right one up. Eco also makes the wheel's force
+feedback 40% lighter. Each mode sets the regenerative braking
+(Eco Maximum, Normal Low, Sport Off), which the wheel's top buttons then
+adjust: left down, right up. CARLA has no regen, so it is brake applied on
+lift-off. The dashboard shows the mode, regen, throttle and brake.
+
+Cruise control, the plain kind that holds a speed with the throttle and never
+brakes, is on the wheel's cruise buttons: on/off switches it on at the current
+speed (20 km/h or more, in D), + and - change the set speed by 5 km/h, and
+resume returns to the last set speed. Braking, the clutch, the hand brake or
+leaving D cancels it; the throttle overrides it while pressed.
+
+Adaptive cruise control (ACC) is a long press of on/off, from 20 km/h like
+plain cruise. It speeds up to 30 km/h, or keeps the current speed when that
+is faster, follows the car ahead in your lane at the time gap set with gap - and +
+(1.0, 1.5, 2.0 or 2.5 s; 1.5 s to start), and brakes, down to a stop. After
+more than 3 s stopped it waits for resume or the throttle. The same +, -,
+resume and cancels apply.
+
+Autopilot (the wheel's autopilot button, or K) drives the car around the map
+on CARLA's Traffic Manager, slowly (30 km/h to start) and in Eco; the wheel
+turns with the car. + and - change its speed, gap - and + its following
+distance. Braking, leaving D, or turning the wheel against it (it resists
+at first) hands the car back, in the drive mode it had before.
+
+The context-aware manual (smart_manual_dashboard/tips.py) is off when the
+drive starts. B, E or P starts it for a Beginner, Experienced or Expert
+driver, which the dashboard's level selector lights up; holding R for a
+second stops it. A tip only comes at a safe moment: standing still, steady
+on a straight or a quiet road, with no junction coming up, few cars around
+and no manoeuvre under way. It stays until the driver has done it.
 """
 
 """
@@ -25,7 +69,7 @@ Use ARROWS or WASD keys for control.
     A/D          : steer left/right
     Q            : toggle reverse
     Space        : hand-brake
-    P            : toggle autopilot
+    K            : toggle autopilot
     M            : toggle manual transmission
     ,/.          : gear up/down
     CTRL + W     : toggle constant velocity mode at 60 km/h
@@ -45,10 +89,13 @@ Use ARROWS or WASD keys for control.
     O            : open/close all doors of vehicle
     T            : toggle vehicle's telemetry
 
-    V            : Select next map layer (Shift+V reverse)
-    B            : Load current selected map layer (Shift+B to unload)
+    B / E / P    : context-aware manual for a Beginner / Experienced / Expert
+    hold R       : context-aware manual off
 
-    R            : toggle recording images to disk
+    V            : Select next map layer (Shift+V reverse)
+    CTRL + B     : Load current selected map layer (CTRL + SHIFT + B to unload)
+
+    SHIFT + R    : toggle recording images to disk
 
     CTRL + R     : toggle recording of simulation (replacing any previous)
     CTRL + P     : start replaying last recorded simulation
@@ -74,6 +121,7 @@ import datetime
 import logging
 import math
 import random
+import time
 import re
 import os
 import weakref
@@ -101,10 +149,12 @@ try:
     from pygame.locals import K_b
     from pygame.locals import K_c
     from pygame.locals import K_d
+    from pygame.locals import K_e
     from pygame.locals import K_f
     from pygame.locals import K_g
     from pygame.locals import K_h
     from pygame.locals import K_i
+    from pygame.locals import K_k
     from pygame.locals import K_l
     from pygame.locals import K_m
     from pygame.locals import K_n
@@ -127,6 +177,13 @@ try:
     import numpy as np
 except ImportError:
     raise RuntimeError('cannot import numpy, make sure numpy package is installed')
+
+from smart_manual_dashboard import Dashboard, focus_window
+from smart_manual_dashboard.tips import Tips
+from steering_wheel import (SteeringWheel, PADDLE_LEFT, PADDLE_RIGHT,
+                            WHEEL_BUTTON_LEFT, WHEEL_BUTTON_RIGHT,
+                            CRUISE_ON_OFF, CRUISE_DOWN, CRUISE_RESUME, CRUISE_UP,
+                            GAP_DOWN, GAP_UP, AUTOPILOT_BUTTON)
 
 OBJECT_TO_COLOR = [
     (255, 255, 255),
@@ -211,6 +268,347 @@ DRIVER_EYES = [
     ('vehicle.taxi.ford', carla.Location(x=0.00, y=-0.40, z=1.08)),
     ('vehicle.mini.cooper', carla.Location(x=-0.35, y=-0.45, z=1.30)),
 ]
+
+
+# Drive modes the paddles step through: the throttle response, the regen
+# level the mode starts with, and the force-feedback strength. Eco caps the
+# throttle at 60% with a soft start and lightens the wheel by 40%, so the
+# switch is felt; Sport answers early in the pedal's travel.
+DriveMode = collections.namedtuple('DriveMode', 'name throttle regen ffb')
+DRIVE_MODES = [
+    DriveMode('Eco', lambda pedal: 0.6 * pedal ** 1.6, 3, 0.6),
+    DriveMode('Normal', lambda pedal: pedal, 1, 1.0),
+    DriveMode('Sport', lambda pedal: pedal ** 0.7, 0, 1.0),
+]
+DEFAULT_DRIVE_MODE = 1
+
+# Regenerative braking, which CARLA lacks, as brake applied when the
+# throttle is released: Off, Low, Medium, Maximum (about 0.5 g).
+REGEN_BRAKE = [0.0, 0.12, 0.25, 0.5]
+REGEN_NAMES = ['Off', 'Low', 'Medium', 'Maximum']
+
+# Cruise control: the lowest speed it holds, the step of + and -, and the
+# PI gains from the speed error (km/h) to throttle.
+CRUISE_MIN_KMH = 20
+CRUISE_MAX_KMH = 180
+CRUISE_STEP_KMH = 5
+CRUISE_KP = 0.08
+CRUISE_KI = 0.03
+# Held this long, on/off turns on adaptive cruise instead.
+LONG_PRESS_SECONDS = 0.6
+
+# Adaptive cruise: the lowest speed it sets when switched on (it keeps a
+# faster one), time gaps for gap 1-4, the distance kept at a standstill, and
+# how far ahead it looks.
+ACC_START_KMH = 30
+ACC_GAPS = [1.0, 1.5, 2.0, 2.5]
+ACC_DEFAULT_GAP = 2
+ACC_STANDSTILL_M = 5.0
+ACC_RANGE_M = 100.0
+# How hard it closes a gap error (m/s of speed per m), the brake per km/h
+# over the target, and the deceleration a full brake gives.
+ACC_GAP_GAIN = 0.3
+ACC_BRAKE_PER_KMH = 0.04
+ACC_FULL_BRAKE_MS2 = 9.0
+ACC_MAX_BRAKE = 0.8
+# Stopped longer than this, it waits for resume or the throttle to go again.
+ACC_AUTO_GO_SECONDS = 3.0
+
+# Autopilot: its starting speed and range (km/h), the drive mode it drives
+# in, and the takeover: the brake pedal past AUTOPILOT_BRAKE, or the wheel
+# held AUTOPILOT_TAKEOVER_DEG away from the car's steering for
+# AUTOPILOT_TAKEOVER_SECONDS without coming back.
+AUTOPILOT_KMH = 30
+AUTOPILOT_MIN_KMH = 10
+AUTOPILOT_MAX_KMH = 90
+AUTOPILOT_DRIVE_MODE = 0
+AUTOPILOT_BRAKE = 0.1
+AUTOPILOT_TAKEOVER_DEG = 40.0
+AUTOPILOT_TAKEOVER_SECONDS = 0.25
+
+# The context-aware manual: held this long, R turns it off. Its view of the
+# world: vehicles within CONTEXT_NEAR_M and pedestrians within
+# CONTEXT_WALKERS_NEAR_M are close by, and a junction is coming up within
+# JUNCTION_AHEAD_SECONDS at the current speed, never less than
+# JUNCTION_AHEAD_MIN_M.
+CONTEXT_OFF_HOLD_SECONDS = 1.0
+CONTEXT_NEAR_M = 30.0
+CONTEXT_WALKERS_NEAR_M = 15.0
+JUNCTION_AHEAD_SECONDS = 4.0
+JUNCTION_AHEAD_MIN_M = 25.0
+LEVEL_KEYS = {K_b: 'Beginner', K_e: 'Experienced', K_p: 'Expert'}
+
+
+class CruiseControl(object):
+    """Cruise control, plain or adaptive.
+
+    Plain cruise holds a set speed with the throttle alone and never brakes.
+    Adaptive cruise (ACC) also follows the car ahead at the time gap, braking
+    when it has to, down to a stop.
+
+    Off, or on: holding the speed (active) or waiting to (standby, after a
+    cancel). The set speed is kept through a cancel, for resume.
+    """
+
+    def __init__(self):
+        self.on = False
+        self.active = False
+        self.adaptive = False
+        self.set_speed = None
+        self.gap = ACC_DEFAULT_GAP
+        # (gap in m, speed in km/h) of the car ahead, or None; set by the caller.
+        self.lead = None
+        # Stopped behind a car for longer than ACC_AUTO_GO_SECONDS.
+        self.waiting = False
+        self._stopped_for = 0.0
+        self._integral = 0.0
+
+    @property
+    def name(self):
+        return 'ACC' if self.adaptive else 'Cruise'
+
+    def toggle(self, kmh, throttle):
+        """A short press of on/off: plain cruise on, or either one off."""
+        if self.on:
+            name = self.name
+            self.on = self.active = self.adaptive = self.waiting = False
+            self.set_speed = None
+            return '%s off' % name
+        self.on = True
+        return self._engage(kmh, int(round(kmh)), throttle)
+
+    def adaptive_on(self, kmh, throttle, default_speed):
+        """A long press of on/off: adaptive cruise at default_speed."""
+        self.on = self.adaptive = True
+        self.waiting = False
+        return self._engage(kmh, default_speed, throttle)
+
+    def step_gap(self, step):
+        self.gap = max(1, min(len(ACC_GAPS), self.gap + step))
+        return 'Gap %d (%.1f s)' % (self.gap, ACC_GAPS[self.gap - 1])
+
+    def change(self, step, kmh, throttle):
+        """+ or -: steps the set speed; on standby, sets the current speed."""
+        if not self.on:
+            return None
+        if not self.active:
+            return self._engage(kmh, int(round(kmh)), throttle)
+        # To the next multiple of the step, so 47 goes to 50 or 45.
+        if step > 0:
+            target = (self.set_speed // step + 1) * step
+        else:
+            target = -(-self.set_speed // -step) * -step + step
+        self.set_speed = max(CRUISE_MIN_KMH, min(CRUISE_MAX_KMH, target))
+        return '%s %d km/h' % (self.name, self.set_speed)
+
+    def resume(self, kmh, throttle):
+        if self.active and self.waiting:
+            self.waiting = False
+            return 'ACC go'
+        if not self.on or self.active:
+            return None
+        if self.set_speed is None:
+            return self._engage(kmh, int(round(kmh)), throttle)
+        return self._engage(kmh, self.set_speed, throttle)
+
+    def cancel(self):
+        if self.active:
+            self.active = self.waiting = False
+            return '%s cancelled' % self.name
+        return None
+
+    def _engage(self, kmh, target, throttle):
+        # ACC also starts behind a car, slow or stopped; plain cruise needs speed.
+        if kmh < CRUISE_MIN_KMH and not (self.adaptive and self.lead is not None):
+            self.active = False
+            if self.adaptive:
+                self.set_speed = max(CRUISE_MIN_KMH, min(CRUISE_MAX_KMH, target))
+            return '%s standby: needs %d km/h' % (self.name, CRUISE_MIN_KMH)
+        self.active = True
+        self.set_speed = max(CRUISE_MIN_KMH, min(CRUISE_MAX_KMH, target))
+        # Starts from the throttle in use, so engaging does not lurch.
+        self._integral = throttle
+        self._stopped_for = 0.0
+        return '%s %d km/h' % (self.name, self.set_speed)
+
+    def control(self, kmh, dt, hold=False):
+        """(throttle, brake) for this frame; hold is a driver override on the throttle."""
+        target = self.set_speed
+        brake = 0.0
+        if self.adaptive:
+            target, brake = self._follow(kmh, dt, hold)
+            if self.waiting:
+                return 0.0, 0.4
+        if brake > 0.0:
+            # Braking: the throttle's integral bleeds off rather than winding up.
+            self._integral = max(0.0, self._integral - 0.6 * dt)
+            return 0.0, brake
+        error = target - kmh
+        if not hold:
+            self._integral = max(0.0, min(1.0, self._integral + CRUISE_KI * error * dt))
+        return max(0.0, min(1.0, self._integral + CRUISE_KP * error)), 0.0
+
+    def _follow(self, kmh, dt, hold):
+        """Adaptive cruise: (target km/h, brake) from the set speed and the car ahead."""
+        target = float(self.set_speed)
+        brake = 0.0
+        if self.lead is not None:
+            gap, lead_kmh = self.lead
+            v, v_lead = kmh / 3.6, lead_kmh / 3.6
+            wanted = ACC_STANDSTILL_M + ACC_GAPS[self.gap - 1] * v
+            # The speed that closes the gap error over a few seconds.
+            target = min(target, 3.6 * max(0.0, v_lead + ACC_GAP_GAIN * (gap - wanted)))
+            # Closing in: the deceleration that matches its speed before the gap is gone.
+            closing = v - v_lead
+            if closing > 0.0:
+                needed = closing ** 2 / (2.0 * max(1.0, gap - 0.5 * ACC_STANDSTILL_M))
+                brake = needed / ACC_FULL_BRAKE_MS2
+            # Behind a stopped car: stop ACC_STANDSTILL_M short of it.
+            if v_lead < 1.0 and v > 0.0:
+                needed = v ** 2 / (2.0 * max(0.5, gap - ACC_STANDSTILL_M))
+                brake = max(brake, 1.5 * needed / ACC_FULL_BRAKE_MS2)
+        # Above the target (a slower car, a lower set speed, downhill); a
+        # light brake is left to the engine.
+        over = ACC_BRAKE_PER_KMH * max(0.0, kmh - target - 3.0)
+        brake = max(brake, over if over >= 0.05 else 0.0)
+        if kmh < 1.0 and target < 3.0:
+            brake = max(brake, 0.4)  # hold the car at a standstill
+        if kmh < 1.0:
+            self._stopped_for += dt
+            if self._stopped_for > ACC_AUTO_GO_SECONDS and not hold:
+                self.waiting = True
+        else:
+            self._stopped_for = 0.0
+        if hold:
+            self.waiting = False
+        return target, min(ACC_MAX_BRAKE, brake)
+
+    @property
+    def state(self):
+        """The dashboard's activeAssist: Cruise, ACC, either with standby, or None."""
+        if not self.on:
+            return 'None'
+        return self.name if self.active else self.name + ' standby'
+
+
+class LeadFinder(object):
+    """The car ahead in the ego car's lane, for adaptive cruise control.
+
+    Follows the ego's lane forward along the map's waypoints (at a junction,
+    the straightest way on) and takes the nearest vehicle on that path.
+    """
+
+    STEP = 2.5
+
+    def __init__(self, world):
+        self._world = world
+        self._map = world.get_map()
+        self._next = 0.0
+        self._lead = None
+
+    def update(self, ego):
+        """(gap in m, speed along the lane in km/h) of the car ahead, or None; 20 Hz."""
+        now = time.time()
+        if now >= self._next:
+            self._next = now + 0.05
+            self._lead = self._find(ego)
+        return self._lead
+
+    def _find(self, ego):
+        here = ego.get_location()
+        wp = self._map.get_waypoint(here)
+        if wp is None:
+            return None
+        path = [wp]
+        for _ in range(int(ACC_RANGE_M / self.STEP)):
+            ahead = path[-1].next(self.STEP)
+            if not ahead:
+                break
+            yaw = path[-1].transform.rotation.yaw
+            path.append(min(ahead, key=lambda w: abs((w.transform.rotation.yaw - yaw + 180.0) % 360.0 - 180.0)))
+        points = []
+        for i, w in enumerate(path):
+            f = w.transform.get_forward_vector()
+            points.append((w.transform.location.x, w.transform.location.y, f.x, f.y,
+                           i * self.STEP, math.hypot(self.STEP / 2.0, 0.4 * w.lane_width)))
+        best = None
+        reach = (ACC_RANGE_M + 10.0) ** 2
+        for other in self._world.get_actors().filter('vehicle.*'):
+            if other.id == ego.id:
+                continue
+            at = other.get_location()
+            if (at.x - here.x) ** 2 + (at.y - here.y) ** 2 > reach:
+                continue
+            x, y, fx, fy, along, radius = min(points, key=lambda p: (at.x - p[0]) ** 2 + (at.y - p[1]) ** 2)
+            if math.hypot(at.x - x, at.y - y) > radius:
+                continue
+            along += (at.x - x) * fx + (at.y - y) * fy
+            gap = along - ego.bounding_box.extent.x - other.bounding_box.extent.x
+            if along <= 0.0 or (best is not None and gap >= best[0]):
+                continue
+            v = other.get_velocity()
+            best = (max(0.0, gap), 3.6 * (v.x * fx + v.y * fy))
+        return best
+
+
+class DrivingContext(object):
+    """What is around the car, for the context-aware tips (smart_manual_dashboard.tips).
+
+    The traffic close by and the junction ahead are measured 5 times a
+    second; a junction is looked for along the ego lane's waypoints (at a
+    junction, the straightest way on), and the car is in one counts as 0 m.
+    """
+
+    STEP = 5.0
+
+    def __init__(self, world):
+        self._world = world
+        self._map = world.get_map()
+        self._next = 0.0
+        self._around = (0, 0, None)
+
+    def update(self, ego, indicating):
+        """The context Tips.update() takes."""
+        speed = _speed_kmh(ego)
+        now = time.time()
+        if now >= self._next:
+            self._next = now + 0.2
+            self._around = self._measure(ego, speed)
+        cars, walkers, junction = self._around
+        return dict(speed=speed, yaw_rate=ego.get_angular_velocity().z, cars_near=cars,
+                    walkers_near=walkers, junction_ahead=junction, indicating=indicating)
+
+    def _measure(self, ego, speed):
+        here = ego.get_location()
+        cars = walkers = 0
+        for actor in self._world.get_actors():
+            if actor.id == ego.id:
+                continue
+            if actor.type_id.startswith('vehicle.'):
+                cars += actor.get_location().distance(here) <= CONTEXT_NEAR_M
+            elif actor.type_id.startswith('walker.pedestrian.'):
+                walkers += actor.get_location().distance(here) <= CONTEXT_WALKERS_NEAR_M
+        return cars, walkers, self._junction_ahead(here, speed)
+
+    def _junction_ahead(self, here, speed):
+        wp = self._map.get_waypoint(here)
+        reach = max(JUNCTION_AHEAD_MIN_M, JUNCTION_AHEAD_SECONDS * speed / 3.6)
+        along = 0.0
+        while wp is not None and along <= reach:
+            if wp.is_junction:
+                return along
+            ahead = wp.next(self.STEP)
+            if not ahead:
+                break
+            yaw = wp.transform.rotation.yaw
+            wp = min(ahead, key=lambda w: abs((w.transform.rotation.yaw - yaw + 180.0) % 360.0 - 180.0))
+            along += self.STEP
+        return None
+
+
+def _speed_kmh(vehicle):
+    v = vehicle.get_velocity()
+    return 3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)
 
 
 def driver_eye(vehicle):
@@ -441,15 +839,45 @@ class World(object):
 
 class KeyboardControl(object):
     """Class that handles keyboard input."""
-    def __init__(self, world, start_in_autopilot):
+    def __init__(self, world, start_in_autopilot, wheel=None, tips=None):
         self._autopilot_enabled = start_in_autopilot
+        self._wheel = wheel
+        # The context-aware manual, and when R went down to turn it off.
+        self._tips = tips
+        self._r_down = None
+        # --ffb-gain, which each drive mode scales.
+        self._ffb_gain = wheel.ffb_gain if wheel is not None else 1.0
+        self._drive_mode = DEFAULT_DRIVE_MODE
+        self._regen = DRIVE_MODES[self._drive_mode].regen
+        self._key_throttle = 0.0
+        self._clutch = 0.0
+        self._cruise = CruiseControl()
+        self._cruise_override = False
+        self._leads = None
+        self._ap_speed = AUTOPILOT_KMH
+        # The drive mode to go back to when the driver takes over.
+        self._mode_before_autopilot = None
+        # Since when the wheel has been held against the autopilot, and how far.
+        self._ap_pull_since = None
+        self._ap_pull_deg = 0.0
+        # The control the Traffic Manager last applied, for the dashboard.
+        self._ap_control = None
+        # When on/off went down, and whether its long press has acted yet.
+        self._on_off_down = None
+        self._on_off_long = False
+        self._applied_throttle = 0.0
+        self._cruise_throttle = 0.0
+        # The throttle asked for, before the drive mode shapes it.
+        self.pedal = 0.0
         self._ackermann_enabled = False
         self._ackermann_reverse = 1
         if isinstance(world.player, carla.Vehicle):
             self._control = carla.VehicleControl()
             self._ackermann_control = carla.VehicleAckermannControl()
             self._lights = carla.VehicleLightState.NONE
-            world.player.set_autopilot(self._autopilot_enabled)
+            world.player.set_autopilot(self._autopilot_enabled, world.traffic_manager.get_port())
+            if self._autopilot_enabled:
+                self._configure_autopilot(world)
             world.player.set_light_state(self._lights)
         elif isinstance(world.player, carla.Walker):
             self._control = carla.WalkerControl()
@@ -466,14 +894,20 @@ class KeyboardControl(object):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return True
+            elif event.type == pygame.KEYDOWN:
+                if event.key == K_r and not pygame.key.get_mods() & (KMOD_CTRL | KMOD_SHIFT):
+                    self._r_down = time.time()
             elif event.type == pygame.KEYUP:
+                if event.key == K_r:
+                    self._r_down = None
                 if self._is_quit_shortcut(event.key):
                     return True
                 elif event.key == K_BACKSPACE:
                     if self._autopilot_enabled:
-                        world.player.set_autopilot(False)
+                        world.player.set_autopilot(False, world.traffic_manager.get_port())
                         world.restart()
-                        world.player.set_autopilot(True)
+                        world.player.set_autopilot(True, world.traffic_manager.get_port())
+                        self._configure_autopilot(world)
                     else:
                         world.restart()
                 elif event.key == K_F1:
@@ -482,6 +916,9 @@ class KeyboardControl(object):
                     world.next_map_layer(reverse=True)
                 elif event.key == K_v:
                     world.next_map_layer()
+                elif event.key in LEVEL_KEYS and not pygame.key.get_mods() & KMOD_CTRL:
+                    if self._tips is not None:
+                        world.hud.notification(self._tips.start(LEVEL_KEYS[event.key]))
                 elif event.key == K_b and pygame.key.get_mods() & KMOD_SHIFT:
                     world.load_map_layer(unload=True)
                 elif event.key == K_b:
@@ -538,7 +975,7 @@ class KeyboardControl(object):
                     if pygame.key.get_mods() & KMOD_CTRL:
                         index_ctrl = 9
                     world.camera_manager.set_sensor(event.key - 1 - K_0 + index_ctrl)
-                elif event.key == K_r and not (pygame.key.get_mods() & KMOD_CTRL):
+                elif event.key == K_r and pygame.key.get_mods() & KMOD_SHIFT:
                     world.camera_manager.toggle_recording()
                 elif event.key == K_r and (pygame.key.get_mods() & KMOD_CTRL):
                     if (world.recording_enabled):
@@ -558,7 +995,7 @@ class KeyboardControl(object):
                     world.destroy_sensors()
                     # disable autopilot
                     self._autopilot_enabled = False
-                    world.player.set_autopilot(self._autopilot_enabled)
+                    world.player.set_autopilot(self._autopilot_enabled, world.traffic_manager.get_port())
                     world.hud.notification("Replaying file 'manual_recording.rec'")
                     # replayer
                     client.replay_file("manual_recording.rec", world.recording_start, 0, 0)
@@ -598,14 +1035,8 @@ class KeyboardControl(object):
                         self._control.gear = max(-1, self._control.gear - 1)
                     elif self._control.manual_gear_shift and event.key == K_PERIOD:
                         self._control.gear = self._control.gear + 1
-                    elif event.key == K_p and not pygame.key.get_mods() & KMOD_CTRL:
-                        if not self._autopilot_enabled and not sync_mode:
-                            print("WARNING: You are currently in asynchronous mode and could "
-                                  "experience some issues with the traffic simulation")
-                        self._autopilot_enabled = not self._autopilot_enabled
-                        world.player.set_autopilot(self._autopilot_enabled)
-                        world.hud.notification(
-                            'Autopilot %s' % ('On' if self._autopilot_enabled else 'Off'))
+                    elif event.key == K_k:
+                        self._set_autopilot(world, not self._autopilot_enabled)
                     elif event.key == K_l and pygame.key.get_mods() & KMOD_CTRL:
                         current_lights ^= carla.VehicleLightState.Special1
                     elif event.key == K_l and pygame.key.get_mods() & KMOD_SHIFT:
@@ -634,9 +1065,21 @@ class KeyboardControl(object):
                     elif event.key == K_x:
                         current_lights ^= carla.VehicleLightState.RightBlinker
 
+        if self._r_down is not None and time.time() - self._r_down >= CONTEXT_OFF_HOLD_SECONDS:
+            self._r_down = None
+            if self._tips is not None and self._tips.running:
+                world.hud.notification(self._tips.stop())
+
+        if self._autopilot_enabled and isinstance(self._control, carla.VehicleControl):
+            self._parse_autopilot(world, pygame.key.get_pressed(), clock.get_time() / 1000.0)
+
         if not self._autopilot_enabled:
             if isinstance(self._control, carla.VehicleControl):
                 self._parse_vehicle_keys(pygame.key.get_pressed(), clock.get_time())
+                if self._wheel is not None and not self._ackermann_enabled:
+                    self._parse_wheel(world)
+                if not self._ackermann_enabled:
+                    self._apply_drive_mode(world, clock.get_time() / 1000.0)
                 self._control.reverse = self._control.gear < 0
                 # Set automatic control-related vehicle lights
                 if self._control.brake:
@@ -668,11 +1111,14 @@ class KeyboardControl(object):
     def _parse_vehicle_keys(self, keys, milliseconds):
         if keys[K_UP] or keys[K_w]:
             if not self._ackermann_enabled:
-                self._control.throttle = min(self._control.throttle + 0.1, 1.00)
+                # Kept apart, so the drive mode's shaping does not feed back.
+                self._key_throttle = min(self._key_throttle + 0.1, 1.00)
+                self._control.throttle = self._key_throttle
             else:
                 self._ackermann_control.speed += round(milliseconds * 0.005, 2) * self._ackermann_reverse
         else:
             if not self._ackermann_enabled:
+                self._key_throttle = 0.0
                 self._control.throttle = 0.0
 
         if keys[K_DOWN] or keys[K_s]:
@@ -704,6 +1150,257 @@ class KeyboardControl(object):
             self._control.hand_brake = keys[K_SPACE]
         else:
             self._ackermann_control.steer = round(self._steer_cache, 1)
+
+    def _parse_wheel(self, world):
+        """Wheel and pedals on top of the keys: steering keys win, pedals add."""
+        for button in self._wheel.pressed():
+            if button in (PADDLE_LEFT, PADDLE_RIGHT):
+                step = 1 if button == PADDLE_RIGHT else -1
+                mode = max(0, min(len(DRIVE_MODES) - 1, self._drive_mode + step))
+                if mode != self._drive_mode:
+                    self._set_drive_mode(mode)
+                    world.hud.notification('%s mode' % DRIVE_MODES[mode].name)
+            elif button in (WHEEL_BUTTON_LEFT, WHEEL_BUTTON_RIGHT):
+                step = 1 if button == WHEEL_BUTTON_RIGHT else -1
+                self._regen = max(0, min(len(REGEN_BRAKE) - 1, self._regen + step))
+                world.hud.notification('Regen %s' % REGEN_NAMES[self._regen])
+            elif button == CRUISE_ON_OFF:
+                # Acts on release (short) or once held long enough (long).
+                self._on_off_down, self._on_off_long = time.time(), False
+            elif button in (CRUISE_DOWN, CRUISE_RESUME, CRUISE_UP):
+                self._cruise_button(button, world)
+            elif button in (GAP_DOWN, GAP_UP):
+                world.hud.notification(self._cruise.step_gap(1 if button == GAP_UP else -1))
+            elif button == AUTOPILOT_BUTTON:
+                self._set_autopilot(world, True)
+                return
+        if self._on_off_down is not None:
+            if self._wheel.is_down(CRUISE_ON_OFF):
+                if not self._on_off_long and time.time() - self._on_off_down >= LONG_PRESS_SECONDS:
+                    self._on_off_long = True
+                    self._cruise_button(CRUISE_ON_OFF, world, long_press=True)
+            else:
+                if not self._on_off_long:
+                    self._cruise_button(CRUISE_ON_OFF, world)
+                self._on_off_down = None
+        steer, throttle, brake, clutch = self._wheel.read(world.player)
+        if self._steer_cache == 0.0:
+            self._control.steer = steer
+        # No clutch in CARLA: pressing it takes the engine off the wheels.
+        self._clutch = clutch
+        self._control.throttle = max(self._control.throttle, throttle) * (1.0 - clutch)
+        self._control.brake = max(self._control.brake, brake)
+        selected = self._wheel.gear()
+        if selected is None:
+            return
+        # D and R drive CARLA's automatic gearbox; N is the manual gearbox's
+        # neutral; P, which CARLA lacks, is neutral with the hand brake on.
+        self._control.manual_gear_shift = selected in ('P', 'N')
+        self._control.gear = {'D': 1, 'R': -1}.get(selected, 0)
+        if selected == 'P':
+            self._control.throttle = 0.0
+            self._control.hand_brake = True
+
+    def _in_drive(self):
+        return not self._control.manual_gear_shift and self._control.gear >= 0
+
+    def _set_autopilot(self, world, enabled, reason=None):
+        """Turns the autopilot on (in D only) or off; reason says why it handed over."""
+        if enabled == self._autopilot_enabled:
+            return
+        if enabled and isinstance(self._control, carla.VehicleControl) and not self._in_drive():
+            world.hud.notification('Autopilot needs D')
+            return
+        self._autopilot_enabled = enabled
+        # Cruise control has no part in it, either way.
+        self._cruise.on = self._cruise.active = self._cruise.adaptive = self._cruise.waiting = False
+        self._ap_pull_since = None
+        self._cruise_override = False
+        tm_port = world.traffic_manager.get_port()
+        if enabled:
+            world.player.set_autopilot(True, tm_port)
+            self._configure_autopilot(world)
+            self._mode_before_autopilot = self._drive_mode
+            self._set_drive_mode(AUTOPILOT_DRIVE_MODE)
+            world.hud.notification('Autopilot on: %d km/h' % self._ap_speed)
+        else:
+            world.player.set_autopilot(False, tm_port)
+            if self._mode_before_autopilot is not None:
+                self._set_drive_mode(self._mode_before_autopilot)
+                self._mode_before_autopilot = None
+            self._ap_control = None
+            world.hud.notification('Autopilot off' + (': ' + reason if reason else ''))
+
+    def _configure_autopilot(self, world):
+        """The Traffic Manager's speed and following distance for the ego car."""
+        tm = world.traffic_manager
+        tm.set_desired_speed(world.player, float(self._ap_speed))
+        tm.distance_to_leading_vehicle(world.player, self._ap_distance)
+        tm.auto_lane_change(world.player, True)
+
+    @property
+    def _ap_distance(self):
+        """Following distance (m): the ACC gap's time at the autopilot's speed."""
+        return ACC_STANDSTILL_M + ACC_GAPS[self._cruise.gap - 1] * self._ap_speed / 3.6
+
+    def _set_drive_mode(self, mode):
+        self._drive_mode = mode
+        self._regen = DRIVE_MODES[mode].regen
+        if self._wheel is not None:
+            self._wheel.ffb_gain = self._ffb_gain * DRIVE_MODES[mode].ffb
+
+    def _parse_autopilot(self, world, keys, dt):
+        """While the car drives itself: its buttons, and the driver taking over."""
+        self._ap_control = world.player.get_control()
+        brake = 1.0 if keys[K_DOWN] or keys[K_s] else 0.0
+        if self._wheel is None:
+            if brake:
+                self._set_autopilot(world, False, 'brake')
+            return
+        for button in self._wheel.pressed():
+            if button == AUTOPILOT_BUTTON:
+                self._set_autopilot(world, False)
+                return
+            if button in (CRUISE_UP, CRUISE_DOWN):
+                step = CRUISE_STEP_KMH if button == CRUISE_UP else -CRUISE_STEP_KMH
+                self._ap_speed = max(AUTOPILOT_MIN_KMH, min(AUTOPILOT_MAX_KMH, self._ap_speed + step))
+                self._configure_autopilot(world)
+                world.hud.notification('Autopilot %d km/h' % self._ap_speed)
+            elif button in (GAP_DOWN, GAP_UP):
+                message = self._cruise.step_gap(1 if button == GAP_UP else -1)
+                self._configure_autopilot(world)
+                world.hud.notification('%s, %d m' % (message, self._ap_distance))
+            elif button in (PADDLE_LEFT, PADDLE_RIGHT):
+                step = 1 if button == PADDLE_RIGHT else -1
+                mode = max(0, min(len(DRIVE_MODES) - 1, self._drive_mode + step))
+                if mode != self._drive_mode:
+                    self._set_drive_mode(mode)
+                    world.hud.notification('%s mode' % DRIVE_MODES[mode].name)
+        _, throttle, pedal_brake, _ = self._wheel.read(world.player)
+        self.pedal = throttle
+        if max(brake, pedal_brake) > AUTOPILOT_BRAKE:
+            self._set_autopilot(world, False, 'brake')
+            return
+        selected = self._wheel.gear()
+        if selected is not None and selected != 'D':
+            self._set_autopilot(world, False, 'shifted to %s' % selected)
+            return
+        # Turned against it: the wheel lagging the car's steering comes back
+        # towards it, a hand holding it does not.
+        pull = abs(self._wheel.deviation(world.player, self._ap_control.steer))
+        if pull < AUTOPILOT_TAKEOVER_DEG:
+            self._ap_pull_since = None
+        elif self._ap_pull_since is None:
+            self._ap_pull_since, self._ap_pull_deg = 0.0, pull
+        elif pull < self._ap_pull_deg - 10.0:
+            self._ap_pull_since = None  # coming back to the car's steering: lag
+        else:
+            self._ap_pull_since += dt
+            self._ap_pull_deg = max(self._ap_pull_deg, pull)
+            if self._ap_pull_since >= AUTOPILOT_TAKEOVER_SECONDS:
+                self._set_autopilot(world, False, 'steering')
+
+    def _lead_finder(self, world):
+        if self._leads is None:
+            self._leads = LeadFinder(world.world)
+        return self._leads
+
+    def _cruise_button(self, button, world, long_press=False):
+        kmh = _speed_kmh(world.player)
+        throttle = self._applied_throttle
+        on = self._cruise.on
+        if button != CRUISE_ON_OFF and not on:
+            return
+        if not self._in_drive() and (button != CRUISE_ON_OFF or not on or long_press):
+            world.hud.notification('%s needs D' % ('ACC' if long_press else self._cruise.name))
+            return
+        if long_press:
+            self._cruise.lead = self._lead_finder(world).update(world.player)
+            start = max(ACC_START_KMH, int(round(kmh)))
+            message = self._cruise.adaptive_on(kmh, throttle, start)
+        elif button == CRUISE_ON_OFF:
+            message = self._cruise.toggle(kmh, throttle)
+        elif button == CRUISE_RESUME:
+            message = self._cruise.resume(kmh, throttle)
+        else:
+            step = CRUISE_STEP_KMH if button == CRUISE_UP else -CRUISE_STEP_KMH
+            message = self._cruise.change(step, kmh, throttle)
+        if message:
+            world.hud.notification(message)
+
+    def _apply_drive_mode(self, world, dt):
+        """Shapes the throttle for the drive mode, adds cruise control, and
+        brakes for regen on lift-off."""
+        self.pedal = self._control.throttle
+        self._control.throttle = DRIVE_MODES[self._drive_mode].throttle(self.pedal)
+        kmh = _speed_kmh(world.player)
+        self._cruise_override = False
+        if self._cruise.adaptive:
+            self._cruise.lead = self._lead_finder(world).update(world.player)
+        else:
+            self._cruise.lead = None
+        if self._cruise.active:
+            # Braking, or taking the drive away, cancels it; the set speed stays for resume.
+            if (self._control.brake > 0.02 or self._clutch > 0.5 or
+                    self._control.hand_brake or not self._in_drive()):
+                world.hud.notification(self._cruise.cancel())
+            else:
+                hold = self.pedal > 0.02 and self._control.throttle > self._cruise_throttle
+                self._cruise_throttle, cruise_brake = self._cruise.control(kmh, dt, hold)
+                self._cruise_override = self._control.throttle > self._cruise_throttle
+                if self._cruise_override:
+                    cruise_brake = 0.0  # the driver's foot wins over ACC braking
+                self._control.throttle = max(self._control.throttle, self._cruise_throttle)
+                self._control.brake = cruise_brake
+        self._applied_throttle = self._control.throttle
+        neutral = self._control.manual_gear_shift and self._control.gear == 0
+        if (self.pedal > 0.02 or neutral or self._clutch > 0.5 or
+                self._control.hand_brake or self._cruise.active):
+            return
+        # Eases off below 13 km/h, so the car rolls to a stop rather than lurching.
+        regen = REGEN_BRAKE[self._regen] * min(1.0, max(0.0, (kmh - 3.0) / 10.0))
+        self._control.brake = max(self._control.brake, regen)
+
+    def dashboard_state(self):
+        """The drivetrain values the dashboard shows."""
+        # On autopilot the Traffic Manager's control is the one applied.
+        control = self._ap_control if self._autopilot_enabled and self._ap_control else self._control
+        return dict(gear=self.selected_gear,
+                    driveMode=DRIVE_MODES[self._drive_mode].name,
+                    regenLevel=self._regen,
+                    driverPedal=int(round(100 * self.pedal)),
+                    appliedThrottle=int(round(100 * control.throttle)),
+                    brake=int(round(100 * control.brake)),
+                    activeAssist='Autopilot' if self._autopilot_enabled else self._cruise.state,
+                    apTarget=self._ap_speed,
+                    apDistance=int(round(self._ap_distance)),
+                    setSpeed=self._cruise.set_speed,
+                    accGap=self._cruise.gap,
+                    accLead=(int(round(self._cruise.lead[0]))
+                             if self._cruise.adaptive and self._cruise.lead else None),
+                    accWaiting=self._cruise.waiting,
+                    throttleOverride=self._cruise_override)
+
+    @property
+    def selected_gear(self):
+        """'P', 'R', 'N' or 'D' as the dashboard shows it."""
+        if self._wheel is not None and self._wheel.gear() is not None:
+            return self._wheel.gear()
+        if self._control.reverse:
+            return 'R'
+        if self._control.manual_gear_shift and self._control.gear == 0:
+            return 'N'
+        return 'D'
+
+    @property
+    def autopilot_enabled(self):
+        return self._autopilot_enabled
+
+    @property
+    def indicating(self):
+        """A blinker is on."""
+        blinkers = carla.VehicleLightState.LeftBlinker | carla.VehicleLightState.RightBlinker
+        return bool(getattr(self, '_lights', 0) & blinkers)
 
     def _parse_walker_keys(self, keys, milliseconds, world):
         self._control.speed = 0.0
@@ -1315,13 +2012,21 @@ def game_loop(args):
     pygame.font.init()
     world = None
     original_settings = None
+    dashboard = None
+    tips = Tips()
+    wheel = None
 
     try:
+        # Opened first so the browser is up, and has taken and given back the
+        # focus, by the time the drive window needs the keyboard.
+        if args.dashboard:
+            dashboard = Dashboard(args.dashboard_port).start(args.dashboard_monitor)
+
         client = carla.Client(args.host, args.port)
         client.set_timeout(2000.0)
 
         sim_world = client.get_world()
-        traffic_manager = client.get_trafficmanager()
+        traffic_manager = client.get_trafficmanager(args.tm_port)
         if args.sync:
             original_settings = sim_world.get_settings()
             settings = sim_world.get_settings()
@@ -1336,15 +2041,31 @@ def game_loop(args):
             print("WARNING: You are currently in asynchronous mode and could "
                   "experience some issues with the traffic simulation")
 
-        display = pygame.display.set_mode(
-            (args.width, args.height),
-            pygame.HWSURFACE | pygame.DOUBLEBUF)
+        flags = pygame.HWSURFACE | pygame.DOUBLEBUF
+        if not args.windowed:
+            # Borderless over the whole primary monitor rather than exclusive
+            # full screen, which would minimise itself whenever the dashboard
+            # on the other monitor is clicked.
+            os.environ['SDL_VIDEO_WINDOW_POS'] = '0,0'
+            args.width, args.height = pygame.display.get_desktop_sizes()[0]
+            flags |= pygame.NOFRAME
+        display = pygame.display.set_mode((args.width, args.height), flags)
         display.fill((0,0,0))
         pygame.display.flip()
 
+        if args.wheel:
+            wheel = SteeringWheel.find(args.wheel, steer_ratio=args.steer_ratio,
+                                       ffb_gain=args.ffb_gain)
+            if wheel is None:
+                print('No steering wheel matching %r; keyboard only.' % args.wheel)
+            else:
+                print('Steering wheel: %s, force feedback %s' % (
+                    wheel.name, 'on' if wheel.has_ffb else 'off'))
+
         hud = HUD(args.width, args.height)
         world = World(sim_world, hud, traffic_manager, args)
-        controller = KeyboardControl(world, args.autopilot)
+        controller = KeyboardControl(world, args.autopilot, wheel, tips)
+        context = DrivingContext(sim_world)
 
         if args.sync:
             sim_world.tick()
@@ -1352,6 +2073,8 @@ def game_loop(args):
             sim_world.wait_for_tick()
 
         clock = pygame.time.Clock()
+        refocus = dashboard is not None
+        last_collision = None
         while True:
             if args.sync:
                 sim_world.tick()
@@ -1361,8 +2084,31 @@ def game_loop(args):
             world.tick(clock)
             world.render(display)
             pygame.display.flip()
+            v = world.player.get_velocity()
+            speed = 3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)
+            if wheel is not None:
+                history = world.collision_sensor.history
+                collision = history[-1] if history else None
+                if collision is not None and collision is not last_collision:
+                    wheel.kick(collision[1])
+                last_collision = collision
+                wheel.update_ffb(world.player, world.imu_sensor,
+                                 controller.autopilot_enabled, clock.get_time() / 1000.0)
+            if dashboard is not None:
+                state = controller.dashboard_state()
+                state.update(tips.update(state, context.update(world.player, controller.indicating)))
+                dashboard.update(speed=int(round(speed)), **state)
+                if refocus and dashboard.connected.is_set():
+                    focus_window(pygame.display.get_wm_info().get('window'))
+                    refocus = False
 
     finally:
+
+        if wheel is not None:
+            wheel.close()
+
+        if dashboard is not None:
+            dashboard.close()
 
         if original_settings:
             sim_world.apply_settings(original_settings)
@@ -1397,7 +2143,10 @@ def main():
         help='enable autopilot')
     argparser.add_argument(
         '--res', metavar='WIDTHxHEIGHT', default='1280x720',
-        help='window resolution (default: 1280x720)')
+        help='window resolution with --windowed (default: 1280x720)')
+    argparser.add_argument(
+        '--windowed', action='store_true',
+        help='a window instead of full screen on the primary monitor')
     argparser.add_argument(
         '--filter', metavar='PATTERN', default=None,
         help='actor filter; random car per Backspace (default: cycle the DRIVER_EYES cars)')
@@ -1413,6 +2162,30 @@ def main():
     argparser.add_argument(
         '--sync', action='store_true',
         help='Activate synchronous mode execution')
+    argparser.add_argument(
+        '--tm-port', metavar='P', default=8000, type=int,
+        help='port of the Traffic Manager (default: 8000)')
+    argparser.add_argument(
+        '--no-dashboard', action='store_false', dest='dashboard',
+        help='do not open the dashboard window')
+    argparser.add_argument(
+        '--dashboard-monitor', metavar='N', default=None, type=int,
+        help='monitor to show the dashboard on, 0 = primary (default: the second monitor)')
+    argparser.add_argument(
+        '--dashboard-port', metavar='P', default=0, type=int,
+        help='HTTP port of the dashboard page (default: any free port)')
+    argparser.add_argument(
+        '--wheel', metavar='NAME', default='G25',
+        help='steering wheel to use, part of its name (default: G25)')
+    argparser.add_argument(
+        '--no-wheel', action='store_const', const=None, dest='wheel',
+        help='ignore any steering wheel')
+    argparser.add_argument(
+        '--steer-ratio', metavar='R', default=10.0, type=float,
+        help='degrees of wheel per degree of front-wheel angle (default: 10)')
+    argparser.add_argument(
+        '--ffb-gain', metavar='G', default=1.0, type=float,
+        help='force-feedback strength, 1 = full (default: 1)')
     args = argparser.parse_args()
 
     args.width, args.height = [int(x) for x in args.res.split('x')]
