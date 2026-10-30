@@ -66,6 +66,12 @@ python manual_control_driver.py
   falling. Autopilot on: four rising sine notes; off: four falling sine
   notes ending on a held low one with its octave below, to be noticed. Plain cruise is silent.
 
+**EV hum** (dashboard, Web Audio)
+- A sine motor whine at 55 Hz + 4 Hz per km/h (about 455 Hz at 100) with a
+  quiet 3rd harmonic, louder under throttle or braking, over low-passed noise
+  for road and wind that opens up with speed. Fades out at a standstill and
+  plays from the dashboard PC's speakers, so `--no-dashboard` has no sound.
+
 **Second-screen dashboard** (`smart_manual_dashboard/`)
 - Opens full screen on monitor 2 (Edge/Chrome app window, local server,
   server-sent events). Shows live speed, gear, drive mode, regen, throttle
