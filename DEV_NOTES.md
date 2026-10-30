@@ -39,10 +39,10 @@ python manual_control_driver.py
 - Long press (0.6 s) of on/off (15); a short press turns either cruise off.
   Gap buttons: 1 gap -, 2 gap +, time gaps 1.0 / 1.5 / 2.0 / 2.5 s, gap 2
   to start; keeps 5 m at a standstill.
-- Set speed to start: the road's limit from `vehicle.get_speed_limit()`,
-  which follows the speed signs. Town10HD has none, so it is CARLA's 30 km/h
-  default everywhere there (its OpenDRIVE says 40 mph on most roads, which
-  nothing in CARLA reads).
+- Set speed to start: 30 km/h, or the current speed when faster (so
+  switching it on at 80 does not brake down to 30). It no longer follows
+  the road's limit (`get_speed_limit()`; always 30 on Town10HD, 100 on the
+  figure-8 highway).
 - The car ahead: the nearest vehicle on the ego lane's waypoints up to 100 m
   (straightest way through junctions), checked 20 times a second. It brakes
   to keep the gap and stops behind a stopped car; after 3 s stopped it waits
@@ -52,7 +52,7 @@ python manual_control_driver.py
   synchronous mode, and killing it leaves the server there, frozen.
 
 **Autopilot**
-- G25 button 0 (or P) toggles it, in D only. The Traffic Manager drives the
+- G25 button 0 (or K) toggles it, in D only. The Traffic Manager drives the
   car around the map at random: 30 km/h to start (+5/-5, 10 to 90 km/h), the
   following distance from the ACC gap buttons (5 m + time gap x speed), Eco
   while it drives. The wheel turns with the car through the FFB spring.
@@ -80,17 +80,44 @@ python manual_control_driver.py
 - `--no-dashboard`, `--dashboard-monitor N`, `--dashboard-port P`;
   `python -m smart_manual_dashboard` runs it without CARLA.
 
-**Manual tips** (`smart_manual_dashboard/tips.py`)
-- A tip slides into the bottom panel with a soft two-note chime (Web Audio,
-  no sound file; the browser starts with autoplay allowed) and a glow that
-  settles. It outlines the dashboard zones it names (`highlight`) with a
-  pulsing ring and a TIP tag, and loops a drawing of the movement to make
-  (`gesture`).
-- One test tip so far: above 100 km/h, "lift your foot off the
-  accelerator", outlining the speed and the throttle bar. It stays at least
-  4 s and clears below 97 km/h.
-- Zones: speed, throttle, brake, gear, cruise, driveMode, regen. Gestures:
-  release-throttle only; button gestures (drive modes and so on) come next.
+**Context-aware manual** (`smart_manual_dashboard/tips.py`)
+- Off when the drive starts. Keyboard B / E / P starts it for Beginner /
+  Experienced / Expert; holding R for 1 s stops it. The header shows
+  CONTEXT AWARE ON with the level lit and pulsing, the key under each level.
+  (Autopilot moved from P to K, image recording to Shift+R, map-layer
+  loading to Ctrl+B / Ctrl+Shift+B.)
+- Beginner curriculum, in order: cruise on/off (tap ON / OFF), brake to
+  cancel it (after 20 s of cruise or switching it off), ACC (hold ON / OFF),
+  autopilot (after 20 s of ACC or switching it off). A tip's turn also comes
+  after 120 s without its condition. Something the driver already did
+  before its tip is skipped. Experienced and Expert have no tips yet.
+- Timing: the first tip can come straight away (pressing the level key is
+  the settling-in), then 20 s between tips. Only at a good
+  moment (stopped 4 s, steady within 4 km/h going straight for 6 s, or at
+  most 1 car within 30 m going straight for 4 s) and not a bad one (a
+  junction within 4 s of driving / 25 m, 3+ cars within 30 m, 2+ people
+  within 15 m, or for 3 s after reversing, turning > 8 deg/s, indicating or
+  braking over 50%). Thresholds are constants at the top of tips.py;
+  the measuring is `DrivingContext` in the driver script.
+- A tip stays up until the driver has done it, whatever happens after it
+  appeared, then shows a 4 s "Done" confirmation with its own chime. The
+  "Why now" line says which good moment it came at. Each step is printed to the console as `[context hh:mm:ss]`.
+- Drawing: control tips light the button on a drawing of the G25 shifter's
+  top (tap: presses in with a ripple; hold: a ring fills) with a leader line
+  to its label; the brake tip loops a foot pressing the pedal. While a tip
+  shows, its panel grows to 420 px with the drawing at 2x on the left and
+  the text on the right; the dashboard above compacts (smaller speed, gear
+  and card values, the ACC gap drawing left out). The tip also
+  outlines the zones it names (`highlight`) with a pulsing ring and TIP tag.
+- With the manual on and no tip, the panel shows the progress dots and what
+  it waits for ("Not now: junction ahead", "Next tip after ...").
+
+**Progress replay** (`smart_manual_dashboard/make_showcase.py`)
+- `python -m smart_manual_dashboard.make_showcase out.html` builds one
+  self-contained page: the real dashboard playing a scripted Beginner drive
+  (speed, assists, traffic and junctions in `DRIVE`), with the tip timing
+  decided by the real `tips.py`, plus chapters and captions
+  (`showcase_template.html`). Rebuild it when the dashboard or tips change.
 
 **Logitech G25 wheel with force feedback** (`steering_wheel.py`)
 - Steering, throttle, brake and clutch; the keyboard keeps working beside it.
@@ -110,8 +137,9 @@ python manual_control_driver.py
 
 ## Known gaps
 
-- Dashboard: nearby vehicles, the driver
-  profile and real tips (beyond the test tip) are still to wire up. The tip
+- Dashboard: nearby vehicles and the Experienced and Expert tips are
+  still to come; blinkers are keyboard-only (Z/X), so indicating only
+  counts as a manoeuvre from the keyboard. The tip
   panel's Dismiss and Turn tips off buttons are gone until there is input
   for them.
 - The d-pad and the other shifter-unit buttons are not mapped yet.
