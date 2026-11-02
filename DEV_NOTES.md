@@ -17,11 +17,11 @@ python manual_control_driver.py
   with a tuned eye.
 
 **Drive modes and regen**
-- Eco / Normal (default) / Sport on the paddles: left = down, right = up.
+- Eco / Normal (default) / Dynamic on the paddles: left = down, right = up.
   Eco caps the throttle at 60% with a soft start and makes the force feedback
-  40% lighter; Sport sharpens the throttle.
+  40% lighter; Dynamic sharpens the throttle.
 - Regenerative braking Off / Low / Medium / Maximum, set by the mode (Eco
-  Maximum, Normal Low, Sport Off) and adjusted with the wheel's top buttons
+  Maximum, Normal Low, Dynamic Off) and adjusted with the wheel's top buttons
   (left down, right up). CARLA has no regen, so it is brake on lift-off:
   0.12 / 0.25 / 0.5 (about 0.5 g), easing off below 13 km/h; none in N or P.
 
@@ -37,7 +37,7 @@ python manual_control_driver.py
 
 **Adaptive cruise control (ACC)**
 - Long press (0.6 s) of on/off (15); a short press turns either cruise off.
-  Gap buttons: 1 gap -, 2 gap +, time gaps 1.0 / 1.5 / 2.0 / 2.5 s, gap 2
+  Gap on the shifter's d-pad (hat 0): up = gap -, down = gap +; time gaps 1.0 / 1.5 / 2.0 / 2.5 s, gap 2
   to start; keeps 5 m at a standstill.
 - Set speed to start: 30 km/h, or the current speed when faster (so
   switching it on at 80 does not brake down to 30). It no longer follows
@@ -54,8 +54,12 @@ python manual_control_driver.py
 **Autopilot**
 - G25 button 0 (or K) toggles it, in D only. The Traffic Manager drives the
   car around the map at random: 30 km/h to start (+5/-5, 10 to 90 km/h), the
-  following distance from the ACC gap buttons (5 m + time gap x speed), Eco
+  following distance from the ACC gap on the d-pad (5 m + time gap x speed), Eco
   while it drives. The wheel turns with the car through the FFB spring.
+- Throttle override: the accelerator past 5% speeds it up by up to 40 km/h
+  at full throttle (a higher Traffic Manager speed) while it keeps steering;
+  released, it drops back to its own speed. The dashboard shows Driver
+  override.
 - Takeover: the brake pedal past 10%, the shifter out of D, or the wheel held
   40 degrees off the car's steering for 0.25 s without coming back (the
   spring resists until then). The drive mode from before comes back.
@@ -90,15 +94,33 @@ python manual_control_driver.py
   cancel it (after 20 s of cruise or switching it off), ACC (hold ON / OFF),
   autopilot (after 20 s of ACC or switching it off). A tip's turn also comes
   after 120 s without its condition. Something the driver already did
-  before its tip is skipped. Experienced and Expert have no tips yet.
+  before its tip is skipped.
+- Experienced curriculum (knows P/R/N/D and cruise on/off): change the set
+  speed with +5/-5 (once cruise or ACC is on), Dynamic mode on the right
+  paddle, RES after braking (once cruise is on standby), the autopilot's
+  speed with +5/-5 (once it drives). The cruise and autopilot tips are
+  strict (they wait for their state, no 120 s fallback); RES and autopilot
+  speed are anytime (they can jump ahead when their moment comes), and so
+  is Dynamic mode, so it need not wait for cruise to be switched on. Dynamic
+  mode and regen tips wait until the driver drives themself (no assist
+  holding the speed), since under an assist they would not feel it.
+- A tip to switch an assist on is skipped when that assist is already on.
+- Expert curriculum (drives with modes and regen): ACC on (hold ON / OFF),
+  then in any order as their moments come: ACC speed with +5/-5 and ACC gap
+  on the d-pad (both once ACC is on), regen to Maximum for one-pedal driving
+  on the wheel's right button (a drive mode setting regen does not count),
+  and overriding the autopilot with the accelerator (while it drives).
+- Drawings now cover the wheel too: the paddles behind the rim and the regen
+  buttons on the spokes; a tip can light more than one button (+5 and -5).
 - Timing: the first tip can come straight away (pressing the level key is
   the settling-in), then 20 s between tips. Only at a good
   moment (stopped 4 s, steady within 4 km/h going straight for 6 s, or at
   most 1 car within 30 m going straight for 4 s) and not a bad one (a
   junction within 4 s of driving / 25 m, 3+ cars within 30 m, 2+ people
   within 15 m, or for 3 s after reversing, turning > 8 deg/s, indicating or
-  braking over 50%). Thresholds are constants at the top of tips.py;
-  the measuring is `DrivingContext` in the driver script.
+  braking over 50%; the autopilot's own braking does not count).
+  Thresholds are constants at the top of tips.py; the measuring is
+  `DrivingContext` in the driver script.
 - A tip stays up until the driver has done it, whatever happens after it
   appeared, then shows a 4 s "Done" confirmation with its own chime. The
   "Why now" line says which good moment it came at. Each step is printed to the console as `[context hh:mm:ss]`.
@@ -107,7 +129,7 @@ python manual_control_driver.py
   to its label; the brake tip loops a foot pressing the pedal. While a tip
   shows, its panel grows to 420 px with the drawing at 2x on the left and
   the text on the right; the dashboard above compacts (smaller speed, gear
-  and card values, the ACC gap drawing left out). The tip also
+  and card values, the ACC gap drawing turned sideways into one row). The tip also
   outlines the zones it names (`highlight`) with a pulsing ring and TIP tag.
 - With the manual on and no tip, the panel shows the progress dots and what
   it waits for ("Not now: junction ahead", "Next tip after ...").
@@ -122,8 +144,9 @@ python manual_control_driver.py
 **Logitech G25 wheel with force feedback** (`steering_wheel.py`)
 - Steering, throttle, brake and clutch; the keyboard keeps working beside it.
   CARLA has no clutch, so the clutch cuts the throttle.
-- 10:1 steering ratio (`--steer-ratio`), picked by driving it with the wheel
-  at a true 900 degrees; a real sedan's 15:1 felt sluggish. Set 900 degrees in
+- 9:1 steering ratio (`--steer-ratio`), picked by driving it with the wheel
+  at a true 900 degrees; a real sedan's 15:1 felt sluggish, and 10:1 still a
+  little slow. Set 900 degrees in
   G HUB: the ratio assumes it, and a smaller range makes steering twitchy.
 - Force feedback: aligning torque from the front tyres' slip (goes light when
   understeering), power steering (light when parking, firmer with speed), road
@@ -142,7 +165,7 @@ python manual_control_driver.py
   counts as a manoeuvre from the keyboard. The tip
   panel's Dismiss and Turn tips off buttons are gone until there is input
   for them.
-- The d-pad and the other shifter-unit buttons are not mapped yet.
+- The d-pad's left and right and the red buttons 1-3 are not mapped yet.
 - If the Traffic Manager fails with a bind error, Windows has reserved port
   8000: pass `--tm-port 8010`.
 - Close the drive window with Esc, not by killing it: destroying a car while
