@@ -132,7 +132,10 @@ python manual_control_driver.py
   and card values, the ACC gap drawing turned sideways into one row). The tip also
   outlines the zones it names (`highlight`) with a pulsing ring and TIP tag.
 - With the manual on and no tip, the panel shows the progress dots and what
-  it waits for ("Not now: junction ahead", "Next tip after ...").
+  it waits for ("Not now: junction ahead", "Next tip after ..."). When the
+  next tip waits for the driver to use a mode first (cruise on, ACC on, the
+  autopilot driving), that mode's card gets a dashed outline and a NEXT TIP
+  tag (`expect` in tips.py).
 
 **Progress replay** (`smart_manual_dashboard/make_showcase.py`)
 - `python -m smart_manual_dashboard.make_showcase out.html` builds one
@@ -141,12 +144,51 @@ python manual_control_driver.py
   decided by the real `tips.py`, plus chapters and captions
   (`showcase_template.html`). Rebuild it when the dashboard or tips change.
 
+**Driving score for user tests** (`smart_manual_dashboard/drive_log.py`, `report.py`)
+- The questionnaires (experience, confidence, knowledge, Van der Laan) are
+  in MS Forms; this only scores the driving. One participant:
+  ```
+  python manual_control_driver.py --participant P07 --speed-limit 50
+  python -m smart_manual_dashboard.report P07
+  ```
+  Everything lands in `study_data/P07/` beside the driver script (not in
+  git); `report --all` redoes every report, and each run rewrites
+  `study_data/summary.csv`, one row per participant, to join with the
+  Forms export on the participant id.
+- The first B, E or P (the level from the Forms answers) starts the test
+  and its log. F starts the free drive: no tips until F again, or at most
+  `--free-drive-seconds` (120), then the score shows as a final tip. F
+  replaces the stock script's Ackermann-controller toggle.
+- Holding Z for 5 s resets for the next participant: the manual off, the
+  assists, drive mode and lights back to their defaults, the same car at a
+  new spawn point, and the next test logging to a new `session-<time>`
+  folder. A tap of Z is still the left blinker. `--record` also runs
+  CARLA's recorder for the test.
+- The log (10 Hz CSV plus an events CSV) holds speed, the limit, the
+  assist, pedals, steering, lateral offset in the lane, the car ahead
+  (gap, headway, TTC), and the tips, features used, takeovers, collisions
+  and lane crossings. `drive.json` has the metrics of the guided phase and
+  the free drive.
+- The score is five parts of 0-100 and their mean, each a plain rule
+  (`drive_log.score`): safety (collisions, TTC under 1.5 s, headway under
+  1 s), lane keeping (SDLP 20 cm = 100, 50 cm = 0; crossings without a
+  blinker; SDLP leaves out 3 s either side of a lane crossing), speed
+  (share of time within the limit + 5 km/h), smoothness (braking harder
+  than 3.5 m/s2 on the brake pedal; maximum regen on lift-off is about
+  3.9 m/s2 and does not count), and features (of the features the tips
+  showed in the guided phase, the share used again in the free drive: do
+  they remember how? Left out of the total when no tip was shown). Each
+  phase is scored at the level it was driven at.
+- The report shows the score with the rule behind each part, each metric
+  of the guided phase and the free drive with what it measures, and the
+  tips' timing.
+
 **Logitech G25 wheel with force feedback** (`steering_wheel.py`)
 - Steering, throttle, brake and clutch; the keyboard keeps working beside it.
   CARLA has no clutch, so the clutch cuts the throttle.
-- 9:1 steering ratio (`--steer-ratio`), picked by driving it with the wheel
-  at a true 900 degrees; a real sedan's 15:1 felt sluggish, and 10:1 still a
-  little slow. Set 900 degrees in
+- 8:1 steering ratio (`--steer-ratio`), picked by driving it with the wheel
+  at a true 900 degrees; a real sedan's 15:1 felt sluggish, 10:1 still a
+  little slow, and 9:1 a touch slow on the first test drives. Set 900 degrees in
   G HUB: the ratio assumes it, and a smaller range makes steering twitchy.
 - Force feedback: aligning torque from the front tyres' slip (goes light when
   understeering), power steering (light when parking, firmer with speed), road
@@ -170,3 +212,9 @@ python manual_control_driver.py
   8000: pass `--tm-port 8010`.
 - Close the drive window with Esc, not by killing it: destroying a car while
   its sensors are still attached has crashed the server.
+- Town10HD has no speed-limit signs, so CARLA reports 30 km/h everywhere:
+  give user tests `--speed-limit` or the speed score counts everything
+  over 35 km/h as speeding.
+- The drive logging has only run against a simulated drive, not CARLA yet:
+  check the lateral offset, the car ahead and the sensor events on the
+  first real test.
