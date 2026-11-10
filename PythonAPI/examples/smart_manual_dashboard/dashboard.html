@@ -1,0 +1,1182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Smart Manual · Dashboard</title>
+<!--
+  Screen 2 of the context-aware manual study: the dashboard from the
+  "CARLA Test Dashboard" design, drawn at 1920x1080 and scaled to fit.
+
+  The page renders whatever state the driver script streams from /events
+  (server-sent events, one JSON object per message). Keys missing from a
+  message keep their value from DEFAULTS below, so the script only has to
+  send what it measures. Today that is the speed, gear, drive mode, regen
+  level, throttle, brake and cruise control; the adaptive-cruise, autopilot
+  and tip panels follow the same props as the design and are ready to be fed.
+
+  ACC and autopilot coming on and going off each have their own chime.
+
+  The context-aware manual (tips.py) is off until the driver script sends
+  manual: true (B starts it, the same for every driver); the header's manual
+  indicator then lights up and pulses, and the tip
+  panel says what the manual is waiting for (contextStatus, tipProgress).
+
+  A tip (showTip + tip) slides in with a chime, outlines the zones it names
+  in tip.highlight, and draws either tip.control, the G25 button (or buttons)
+  to tap or hold on the shifter or the wheel, or tip.gesture, the movement the driver makes. Once the driver
+  has done it, tip.complete shows it done, with a chime of its own.
+  Zones: speed, throttle, brake, gear, cruise, acc, autopilot, driveMode, regen.
+  Shifter buttons: speed-up, speed-down, cc, acc, autopilot, dpad-up (gap -), dpad-down (gap +).
+  Wheel (tip.control.device = 'wheel'): paddle-left, paddle-right, regen-down, regen-up.
+  Gestures: release-throttle, press-brake, press-throttle.
+
+  layout: 'minimal' (J in the driver) swaps to a minimal layout: the speed on
+  the left, and cards on the right that pop out only while in use or named
+  by a tip, with manualStatus as grey lines under them. See "The minimal
+  layout" in the script.
+
+  At the end of a test (drive_log.py) the free drive shows in the empty tip
+  panel (freeDrive, with contextStatus counting down), and then the driving
+  score as a final tip: tip.score = {total, parts: [{name, score, note}]},
+  drawn as the total and a bar for each part.
+-->
+<style>
+@font-face { font-family: 'Barlow'; font-weight: 400; src: url(fonts/Barlow-Regular.woff2) format('woff2'); }
+@font-face { font-family: 'Barlow'; font-weight: 600; src: url(fonts/Barlow-SemiBold.woff2) format('woff2'); }
+@font-face { font-family: 'Barlow'; font-weight: 700; src: url(fonts/Barlow-Bold.woff2) format('woff2'); }
+@font-face { font-family: 'Barlow Semi Condensed'; font-weight: 600; src: url(fonts/BarlowSemiCondensed-SemiBold.woff2) format('woff2'); }
+@font-face { font-family: 'Barlow Semi Condensed'; font-weight: 700; src: url(fonts/BarlowSemiCondensed-Bold.woff2) format('woff2'); }
+
+html, body { margin: 0; height: 100%; overflow: hidden; background: #F2F3F5; cursor: none; }
+button { font: inherit; }
+#stage { position: absolute; left: 50%; top: 50%; width: 1920px; height: 1080px; transform-origin: 0 0; }
+#frame { width: 1920px; height: 1080px; box-sizing: border-box; padding: 36px 48px; display: flex; flex-direction: column; gap: 24px; background: #F2F3F5; color: #171A20; font-family: 'Barlow', system-ui, sans-serif; --accent: #3E6AE1; }
+#top, #tipslot { display: contents; }
+/* A zone a tip refers to. The page is redrawn every frame, so the pulse is
+   kept in step by a negative animation-delay from when the tip appeared. */
+.zone-on { position: relative; border-radius: 16px; outline: 3px solid var(--accent); outline-offset: 12px; animation: zonePulse 2.4s ease-in-out infinite; }
+@keyframes zonePulse {
+  0%, 100% { outline-color: var(--accent); box-shadow: 0 0 34px 14px rgba(62, 106, 225, 0.22); }
+  50% { outline-color: rgba(62, 106, 225, 0.45); box-shadow: 0 0 18px 6px rgba(62, 106, 225, 0.08); }
+}
+/* On the outline's top-right corner, where the zones have room above them. */
+.zone-tag { position: absolute; top: -24px; right: -14px; padding: 2px 10px; border-radius: 6px; font: 700 13px 'Barlow', sans-serif; letter-spacing: 0.08em; background: var(--accent); color: #FFFFFF; }
+/* The mode the next tip waits for: a quieter dashed outline, no pulse. */
+.zone-expect { position: relative; border-radius: 16px; outline: 2px dashed var(--accent); outline-offset: 8px; }
+.zone-tag-expect { background: #EAF0FD; color: var(--accent); border: 1px solid var(--accent); }
+/* The tip's arrival: slides up, its border flashes and settles. */
+.tip-in { animation: tipSlide 0.5s cubic-bezier(0.2, 0.8, 0.2, 1), tipGlow 2.6s ease-out; }
+@keyframes tipSlide { from { opacity: 0; transform: translateY(28px); } to { opacity: 1; transform: none; } }
+@keyframes tipGlow {
+  0%, 25% { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(62, 106, 225, 0.35), 0 0 60px 10px rgba(62, 106, 225, 0.30); }
+  100% { border-color: #C5D3F5; box-shadow: none; }
+}
+/* release-throttle: the foot lifts off the accelerator and the pedal springs up. */
+.g-loop { animation: gFade 3.4s ease-in-out infinite; }
+.g-foot { transform-box: view-box; transform-origin: 84px 168px; animation: gFoot 3.4s ease-in-out infinite; }
+.g-pedal { transform-box: view-box; transform-origin: 210px 168px; animation: gPedal 3.4s ease-in-out infinite; }
+.g-arrow { animation: gArrow 3.4s ease-in-out infinite; }
+@keyframes gFade { 0% { opacity: 0; } 8%, 86% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes gFoot { 0%, 22% { transform: rotate(0deg); } 52%, 100% { transform: rotate(-13deg); } }
+@keyframes gPedal { 0%, 22% { transform: rotate(-18deg); } 52%, 100% { transform: rotate(-36deg); } }
+@keyframes gArrow { 0%, 30% { opacity: 0; transform: translateY(10px); } 52%, 86% { opacity: 1; transform: none; } 100% { opacity: 0; } }
+/* press-brake: the same foot pressing the brake pedal down. */
+.g-foot-press { transform-box: view-box; transform-origin: 84px 168px; animation: gFootPress 3.4s ease-in-out infinite; }
+.g-pedal-press { transform-box: view-box; transform-origin: 210px 168px; animation: gPedalPress 3.4s ease-in-out infinite; }
+.g-arrow-down { animation: gArrowDown 3.4s ease-in-out infinite; }
+@keyframes gFootPress { 0%, 22% { transform: rotate(-13deg); } 52%, 100% { transform: rotate(0deg); } }
+@keyframes gPedalPress { 0%, 22% { transform: rotate(-36deg); } 52%, 100% { transform: rotate(-18deg); } }
+@keyframes gArrowDown { 0%, 30% { opacity: 0; transform: translateY(-10px); } 52%, 86% { opacity: 1; transform: none; } 100% { opacity: 0; } }
+/* A shifter button to tap: it presses in and a ripple goes out. To hold:
+   it stays in while a ring fills around it. */
+.c-tap { transform-box: fill-box; transform-origin: center; animation: cTap 1.8s ease-in-out infinite; }
+.c-ripple { transform-box: fill-box; transform-origin: center; animation: cRipple 1.8s ease-out infinite; }
+@keyframes cTap { 0%, 10%, 32%, 100% { transform: scale(1); } 18% { transform: scale(0.78); } }
+@keyframes cRipple { 0%, 16% { opacity: 0; transform: scale(1); } 20% { opacity: 1; transform: scale(1); } 70%, 100% { opacity: 0; transform: scale(2.6); } }
+.c-held { transform-box: fill-box; transform-origin: center; animation: cHeld 2.8s ease-in-out infinite; }
+.c-hold { stroke-dasharray: 100.5; animation: cHold 2.8s linear infinite; }
+@keyframes cHeld { 0%, 6% { transform: scale(1); } 10%, 62% { transform: scale(0.78); } 68%, 100% { transform: scale(1); } }
+@keyframes cHold { 0%, 10% { stroke-dashoffset: 100.5; opacity: 1; } 60%, 84% { stroke-dashoffset: 0; opacity: 1; } 100% { stroke-dashoffset: 0; opacity: 0; } }
+/* A tip done: the tick draws itself. */
+.d-tick { stroke-dasharray: 60; animation: dTick 0.6s 0.15s ease-out both; }
+@keyframes dTick { from { stroke-dashoffset: 60; } to { stroke-dashoffset: 0; } }
+/* The context-aware manual running: the manual indicator breathes and its dot blinks. */
+.ctx-live { animation: ctxPulse 3s ease-in-out infinite; }
+@keyframes ctxPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(62, 106, 225, 0); }
+  50% { box-shadow: 0 0 26px 4px rgba(62, 106, 225, 0.35); }
+}
+.ctx-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); animation: ctxDot 1.5s ease-in-out infinite; }
+@keyframes ctxDot { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+/* Autopilot driving: its card breathes, so it is clear the car drives itself.
+   Kept in step across redraws like the tip zones, from when it came on. */
+.ap-live { animation: apPulse 2.2s ease-in-out infinite; }
+@keyframes apPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(62, 106, 225, 0); background: #EAF0FD; }
+  50% { box-shadow: 0 0 44px 10px rgba(62, 106, 225, 0.45), inset 0 0 30px rgba(62, 106, 225, 0.18); background: #DCE6FB; }
+}
+/* The minimal layout (layout: 'minimal', J in the driver): speed on the
+   left, cards that pop out on the right. A card slides in and out; kept in
+   step across redraws by a negative animation-delay from when it changed. */
+#mini { width: 1920px; height: 1080px; box-sizing: border-box; padding: 36px 48px; gap: 32px; background: #F2F3F5; color: #171A20; font-family: 'Barlow', system-ui, sans-serif; --accent: #3E6AE1; }
+.pop-in { animation: popIn 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.pop-out { animation: popOut 0.35s ease-in both; }
+@keyframes popIn { from { opacity: 0; transform: translateX(80px); } to { opacity: 1; transform: none; } }
+@keyframes popOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(80px); } }
+#m-road { transition: opacity 0.5s ease; }
+/* The lane view: the autopilot's road flowing toward the car, and ACC's
+   radar waves going out from its front. */
+.rail-flow { animation: railFlow 0.9s linear infinite; }
+@keyframes railFlow { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -60; } }
+.radar-wave { transform-box: view-box; transform-origin: 280px 596px; vector-effect: non-scaling-stroke; animation: radarWave 1.8s ease-out infinite; }
+@keyframes radarWave { 0% { transform: scale(0.8); opacity: 0; } 15% { opacity: 1; } 100% { transform: scale(3.2); opacity: 0; } }
+#offline { position: absolute; right: 48px; bottom: 12px; font: 600 14px 'Barlow', sans-serif; letter-spacing: 0.06em; color: #D97706; display: none; }
+</style>
+</head>
+<body>
+<div id="stage"><div id="frame"><div id="top"></div><div id="tipslot"></div></div>
+<div id="mini" style="display: none"><div id="m-left" style="display: contents"></div>
+<div style="flex-grow: 1; min-width: 0; position: relative; display: flex; flex-direction: column">
+<div id="m-road" style="position: absolute; inset: 0 0 90px 0; display: flex; align-items: center; justify-content: center"></div>
+<div id="m-over" style="position: relative; flex-grow: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px">
+<div id="m-cards" style="display: flex; flex-direction: column; align-items: center; gap: 20px"></div><div id="m-tip"></div></div>
+<div id="m-status" style="position: relative; height: 90px; flex-shrink: 0"></div></div></div></div>
+<div id="offline">NO DATA FROM CARLA</div>
+<script>
+'use strict';
+
+// Values for everything the script does not send yet. The assists start OFF
+// and the tip panel hidden, so nothing on screen claims a state the car is
+// not in.
+var DEFAULTS = {
+  activeAssist: 'None',   // None | Cruise | Cruise standby | ACC | ACC standby | Autopilot
+  manual: false,          // the context-aware manual is running
+  contextStatus: null,    // what the manual waits for, under an empty tip panel
+  tipProgress: null,      // [tips given, tips in all]
+  freeDrive: false,       // the free drive at the end of a test: no tips, contextStatus counts down
+  expect: null,           // zones of the mode the next tip waits for, outlined dashed: cruise, acc, autopilot
+  speed: null,            // km/h; null until the first reading
+  setSpeed: null,         // km/h; null when no speed is set
+  throttleOverride: null, // true while the pedal overrides an assist; null works it out from the bars
+  accGap: 2,              // 1..4
+  accLead: null,          // m to the car ahead while ACC is on; null when there is none
+  accWaiting: false,      // ACC stopped behind a car, waiting for its button or the throttle
+  apTarget: 30,           // km/h
+  apDistance: 17,         // m
+  appliedThrottle: 0,     // %
+  driverPedal: 0,         // %
+  brake: 0,               // %
+  gear: 'D',              // P | R | N | D
+  driveMode: 'Normal',    // Eco | Normal | Dynamic
+  regenLevel: 1,          // 0..3: Off | Low | Medium | Maximum
+  showTip: false,
+  tip: null,              // {title, body, why, highlight, control | gesture, action, complete}; null uses SAMPLE_TIP
+  layout: 'minimal',      // full | minimal (J in the driver swaps them)
+  manualStatus: null,     // {moment, next}: the minimal layout's grey lines about the manual
+  accent: '#3E6AE1'
+};
+
+var SAMPLE_TIP = {
+  title: 'Cruise control holds your speed for you',
+  body: 'Press SET to keep driving at your current speed. Tap the brake at any moment and cruise control switches off.',
+  why: 'Why now: steady motorway speed for 20 seconds',
+  key: 'SET',
+  input: 'Shifter button [1]'
+};
+
+var SPEED_MAX = 160;
+
+function esc(v) {
+  return String(v).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function pct(v) { return Math.max(0, Math.min(100, v)) + '%'; }
+
+function chip(text) {
+  return '<span style="padding: 4px 10px; border-radius: 6px; border: 1px solid #D0D1D2; font-size: 14px; font-weight: 600; color: #393C41">' + text + '</span>';
+}
+
+var tipShownAt = 0;
+var autopilotSince = 0;
+var accSince = 0;
+var contextSince = 0;
+
+// A zone the tip names gets the zone-on outline and a TIP tag. zoneAttr
+// opens the element's style attribute, so the caller adds its own style.
+function zoneOn(p, name) {
+  return p.showTip && p.tip && (p.tip.highlight || []).indexOf(name) >= 0;
+}
+// A zone of the mode the next tip waits for the driver to use (p.expect).
+function zoneExpect(p, name) {
+  return !p.showTip && (p.expect || []).indexOf(name) >= 0;
+}
+function zoneAttr(p, name) {
+  if (zoneOn(p, name)) return ' class="zone-on" style="animation-delay: -' + (Date.now() - tipShownAt) + 'ms; ';
+  return zoneExpect(p, name) ? ' class="zone-expect" style="' : ' style="';
+}
+function zoneTag(p, name) {
+  if (zoneOn(p, name)) return '<span class="zone-tag">TIP</span>';
+  return zoneExpect(p, name) ? '<span class="zone-tag zone-tag-expect">NEXT TIP</span>' : '';
+}
+
+function render(p) {
+  var accent = p.accent;
+  var assist = p.activeAssist;
+  var on = p.manual;
+  var speed = p.speed;
+  var setSpeed = p.setSpeed === null ? '–' : p.setSpeed;
+  var gap = Math.max(1, Math.min(4, p.accGap));
+  var applied = p.appliedThrottle;
+  var pedal = p.driverPedal;
+  var brake = p.brake;
+  var regen = Math.max(0, Math.min(3, p.regenLevel));
+  // While a tip shows, its panel grows and everything above compacts.
+  var compact = p.showTip;
+  function z(full, small) { return compact ? small : full; }
+
+  var active = { border: accent, bg: '#EAF0FD', chipText: 'ACTIVE', chipBg: accent, chipFg: '#FFFFFF', value: '#171A20' };
+  var standby = { border: '#F0C27C', bg: '#FFF8ED', chipText: 'STANDBY', chipBg: '#FDEDD3', chipFg: '#D97706', value: '#171A20' };
+  var off = { border: '#E4E5E7', bg: '#FFFFFF', chipText: 'OFF', chipBg: '#E4E5E7', chipFg: '#5C5E62', value: '#8E8E93' };
+
+  var cc = assist === 'Cruise' ? active : (assist === 'Cruise standby' ? standby : off);
+  var acc = assist === 'ACC' ? active : (assist === 'ACC standby' ? standby : off);
+  // Plain and adaptive cruise share the set speed; only the one in use shows it.
+  var ccSpeed = assist.indexOf('Cruise') === 0 ? setSpeed : '–';
+  var accSpeed = assist.indexOf('ACC') === 0 ? setSpeed : '–';
+  var lead = assist.indexOf('ACC') === 0 ? p.accLead : null;
+  var ap = assist === 'Autopilot' ? Object.assign({}, active, { chipText: 'DRIVING' }) : off;
+
+  var gapSeconds = ['1.0 s', '1.5 s', '2.0 s', '2.5 s'][gap - 1];
+  var markerSpeed = assist === 'Autopilot' ? p.apTarget : setSpeed;
+  var showMarker = assist !== 'None' && markerSpeed !== '–';
+  var regenNames = ['Off', 'Low', 'Medium', 'Maximum'];
+
+  var pedalStatus;
+  if (assist === 'None' || assist === 'Cruise standby' || assist === 'ACC standby') {
+    pedalStatus = { text: 'Manual control', bg: '#E4E5E7', fg: '#393C41' };
+  } else if (p.throttleOverride === null ? pedal > applied : p.throttleOverride) {
+    pedalStatus = { text: 'Driver override', bg: '#FDEDD3', fg: '#D97706' };
+  } else {
+    pedalStatus = { text: 'System controlled', bg: '#EAF0FD', fg: accent };
+  }
+
+  function card(s, inner, zone) {
+    var attr = zoneAttr(p, zone);
+    if (zone === 'autopilot' && assist === 'Autopilot' && !zoneOn(p, zone)) {
+      attr = ' class="ap-live" style="animation-delay: -' + (Date.now() - autopilotSince) + 'ms; ';
+    }
+    return '<div' + attr + 'flex-grow: 1; box-sizing: border-box; padding: ' + z('18px 22px', '10px 18px') + '; border-radius: 16px; border: 2px solid ' + s.border + '; background: ' + s.bg + '; display: flex; flex-direction: column; justify-content: space-between">' + zoneTag(p, zone) + inner + '</div>';
+  }
+  function cardHead(title, s) {
+    return '<div style="display: flex; align-items: center; justify-content: space-between">' +
+      '<span style="font-size: 24px; font-weight: 600">' + title + '</span>' +
+      '<span style="padding: 4px 12px; border-radius: 999px; font-size: 14px; font-weight: 700; letter-spacing: 0.06em; background: ' + s.chipBg + '; color: ' + s.chipFg + '">' + s.chipText + '</span>' +
+      '</div>';
+  }
+
+  var h = '';
+
+  // Header
+  h += '<header style="height: 56px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between">' +
+    '<div style="display: flex; align-items: baseline; gap: 18px">' +
+    '<span style="font-family: \'Barlow Semi Condensed\', sans-serif; font-weight: 700; font-size: 28px; letter-spacing: 0.08em">SMART MANUAL</span>' +
+    '<span style="font-size: 19px; color: #5C5E62">Context-aware driving guide</span>' +
+    '</div>' +
+    '<div style="display: flex; align-items: center; gap: 14px">' +
+    (on
+      ? '<span style="display: flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 700; letter-spacing: 0.08em; color: ' + accent + '">' +
+        '<span class="ctx-dot" style="animation-delay: -' + (Date.now() - contextSince) + 'ms"></span>CONTEXT AWARE · ON</span>'
+      : '<span style="font-size: 15px; font-weight: 600; letter-spacing: 0.08em; color: #8E8E93">CONTEXT AWARE · OFF</span>') +
+    '<div' + (on ? ' class="ctx-live" style="animation-delay: -' + (Date.now() - contextSince) + 'ms; ' : ' style="') +
+    'display: flex; gap: 6px; padding: 5px; border-radius: 12px; background: #FFFFFF; border: 1px solid ' + (on ? accent : '#E4E5E7') + '">';
+  // The manual, with the key that starts it.
+  var fg = on ? '#FFFFFF' : '#A2A3A5';
+  h += '<span style="display: flex; align-items: center; gap: 10px; padding: 8px 12px 8px 18px; border-radius: 8px; font-size: 17px; font-weight: 600; background: ' + (on ? accent : 'transparent') + '; color: ' + fg + '">Manual' +
+    '<span style="padding: 0 6px; border-radius: 5px; border: 1px solid ' + fg + '; font-size: 13px; font-weight: 700; line-height: 18px; opacity: 0.75">B</span></span>';
+  h += '</div>' +
+    (on ? '<span style="font-size: 14px; color: #8E8E93">Hold R to stop</span>' : '') +
+    '</div></header>';
+
+  h += '<main style="flex-grow: 1; min-height: 0; display: flex; gap: 24px">';
+
+  // Speed assist column
+  h += '<section aria-label="Speed assist" style="width: 560px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px">' +
+    '<h2 style="margin: 0; font-size: 15px; font-weight: 600; letter-spacing: 0.08em; color: #5C5E62">SPEED ASSIST · ONE ACTIVE AT A TIME</h2>';
+
+  h += card(cc, cardHead('Cruise control', cc) +
+    '<div style="display: flex; align-items: baseline; gap: 10px">' +
+    '<span style="font-family: \'Barlow Semi Condensed\', sans-serif; font-size: ' + z(56, 38) + 'px; font-weight: 600; line-height: 1; color: ' + cc.value + '">' + esc(ccSpeed) + '</span>' +
+    '<span style="font-size: 18px; color: #5C5E62">km/h set speed</span></div>' +
+    '<div style="display: flex; gap: 8px">' + chip('CC') + chip('SPEED + / −') +
+    '<span style="font-size: 15px; color: #5C5E62; margin-left: 6px">Brake cancels</span></div>', 'cruise');
+
+  var bars = '';
+  [4, 3, 2, 1].forEach(function (n) {
+    var bg = n <= gap ? (assist === 'ACC' ? accent : '#8E8E93') : '#E4E5E7';
+    bars += '<span style="display: block; height: 5px; border-radius: 3px; width: ' + (24 + (5 - n) * 14) + 'px; background: ' + bg + '"></span>';
+  });
+  // Compact, the same picture turned sideways: your car, the gap, the car ahead.
+  var barsRow = '';
+  [1, 2, 3, 4].forEach(function (n) {
+    var bg = n <= gap ? (assist === 'ACC' ? accent : '#8E8E93') : '#E4E5E7';
+    barsRow += '<span style="display: block; width: 5px; border-radius: 3px; height: ' + (10 + (5 - n) * 4) + 'px; background: ' + bg + '"></span>';
+  });
+  // The car ahead, drawn above the gap bars when ACC has one.
+  var leadCar = '<svg width="34" height="22" viewBox="0 0 40 26" fill="none" stroke="' + (lead !== null ? accent : 'transparent') + '" stroke-width="2.5" aria-hidden="true"><rect x="8" y="2" width="24" height="22" rx="6"></rect><line x1="12" y1="17" x2="28" y2="17"></line></svg>';
+  var leadText = p.accWaiting && assist === 'ACC' ? 'Stopped · press ACC to go'
+    : (lead !== null ? 'Car ahead · ' + esc(lead) + ' m' : (assist.indexOf('ACC') === 0 ? 'No car ahead' : gapSeconds + ' time gap'));
+  h += card(acc, cardHead('Adaptive cruise', acc) +
+    '<div style="display: flex; align-items: center; gap: 28px">' +
+    '<div style="display: flex; align-items: baseline; gap: 10px">' +
+    '<span style="font-family: \'Barlow Semi Condensed\', sans-serif; font-size: ' + z(56, 38) + 'px; font-weight: 600; line-height: 1; color: ' + acc.value + '">' + esc(accSpeed) + '</span>' +
+    '<span style="font-size: 18px; color: #5C5E62">km/h</span></div>' +
+    '<div style="display: flex; align-items: center; gap: 14px">' +
+    (compact ? '<div style="display: flex; align-items: center; gap: 5px">' +
+      '<svg width="26" height="17" viewBox="0 0 40 26" fill="none" stroke="#393C41" stroke-width="2.5" style="transform: rotate(90deg); margin: 0 2px" aria-hidden="true"><rect x="8" y="2" width="24" height="22" rx="6"></rect><line x1="12" y1="10" x2="28" y2="10"></line></svg>' +
+      barsRow +
+      '<svg width="26" height="17" viewBox="0 0 40 26" fill="none" stroke="' + (lead !== null ? accent : 'transparent') + '" stroke-width="2.5" style="transform: rotate(90deg); margin: 0 2px" aria-hidden="true"><rect x="8" y="2" width="24" height="22" rx="6"></rect><line x1="12" y1="17" x2="28" y2="17"></line></svg>' +
+      '</div>'
+    : '<div style="display: flex; flex-direction: column; align-items: center; gap: 4px">' + leadCar + bars +
+    '<svg width="40" height="26" viewBox="0 0 40 26" fill="none" stroke="#393C41" stroke-width="2" aria-hidden="true"><rect x="8" y="2" width="24" height="22" rx="6"></rect><line x1="12" y1="10" x2="28" y2="10"></line></svg>' +
+    '</div>') +
+    '<div style="display: flex; flex-direction: column; gap: 2px">' +
+    '<span style="font-size: 22px; font-weight: 600; color: ' + acc.value + '">Gap ' + gap + ' · ' + gapSeconds + '</span>' +
+    '<span style="font-size: 16px; color: ' + (p.accWaiting && assist === 'ACC' ? '#D97706' : '#5C5E62') + '">' + leadText + '</span>' +
+    '</div></div></div>' +
+    '<div style="display: flex; gap: 8px; align-items: center">' + chip('ACC') + chip('SPEED + / −') + chip('GAP − / +') + '</div>', 'acc');
+
+  h += card(ap, cardHead('Autopilot', ap) +
+    '<div style="display: flex; gap: 40px">' +
+    '<div style="display: flex; flex-direction: column; gap: 2px">' +
+    '<span style="font-size: 15px; font-weight: 600; letter-spacing: 0.06em; color: #5C5E62">TARGET SPEED</span>' +
+    '<span style="font-family: \'Barlow Semi Condensed\', sans-serif; font-size: ' + z(44, 32) + 'px; font-weight: 600; line-height: 1; color: ' + ap.value + '">' + esc(p.apTarget) + ' <span style="font-size: 18px; color: #5C5E62">km/h</span></span>' +
+    '</div>' +
+    '<div style="display: flex; flex-direction: column; gap: 2px">' +
+    '<span style="font-size: 15px; font-weight: 600; letter-spacing: 0.06em; color: #5C5E62">FOLLOWING DISTANCE</span>' +
+    '<span style="font-family: \'Barlow Semi Condensed\', sans-serif; font-size: ' + z(44, 32) + 'px; font-weight: 600; line-height: 1; color: ' + ap.value + '">' + esc(p.apDistance) + ' <span style="font-size: 18px; color: #5C5E62">m</span></span>' +
+    '</div></div>' +
+    '<div style="display: flex; gap: 8px; align-items: center">' + chip('AUTOPILOT') + chip('SPEED + / −') + chip('GAP − / +') +
+    '<span style="font-size: 15px; color: #5C5E62; margin-left: 6px">Brake or steer to take over</span></div>', 'autopilot');
+  h += '</section>';
+
+  // Speed and gear
+  h += '<section aria-label="Speed and gear" style="flex-grow: 1; min-width: 0; box-sizing: border-box; padding: ' + z('32px 48px', '14px 40px') + '; border-radius: 20px; background: #FFFFFF; border: 1px solid #E4E5E7; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: ' + z(22, 10) + 'px">' +
+    '<div' + zoneAttr(p, 'speed') + 'display: flex; flex-direction: column; align-items: center">' + zoneTag(p, 'speed') +
+    '<span style="font-family: \'Barlow Semi Condensed\', sans-serif; font-size: ' + z(220, 120) + 'px; font-weight: 600; line-height: 0.88; font-variant-numeric: tabular-nums">' + (speed === null ? '–' : esc(speed)) + '</span>' +
+    '<div style="display: flex; align-items: center; gap: 16px; margin-top: 8px">' +
+    '<span style="font-size: 26px; color: #5C5E62">km/h</span>' +
+    (showMarker ? '<span style="padding: 4px 12px; border-radius: 8px; font-size: 18px; font-weight: 700; letter-spacing: 0.04em; background: #EAF0FD; color: ' + accent + '">SET ' + esc(markerSpeed) + '</span>' : '') +
+    '</div></div>';
+
+  h += '<div style="width: 100%; max-width: 640px; display: flex; flex-direction: column; gap: 6px">' +
+    '<div style="position: relative; height: 10px; border-radius: 5px; background: #E4E5E7">' +
+    '<div style="height: 10px; border-radius: 5px; background: #171A20; width: ' + pct((speed || 0) / SPEED_MAX * 100) + '"></div>' +
+    (showMarker ? '<div style="position: absolute; top: -7px; width: 4px; height: 24px; border-radius: 2px; transform: translateX(-50%); background: ' + accent + '; left: ' + pct(markerSpeed / SPEED_MAX * 100) + '"></div>' : '') +
+    '</div>' +
+    '<div style="display: flex; justify-content: space-between; font-size: 14px; color: #8E8E93">' +
+    '<span>0</span><span>40</span><span>80</span><span>120</span><span>160</span></div></div>';
+
+  h += '<div role="img" aria-label="Gear selector"' + zoneAttr(p, 'gear') + 'display: flex; gap: 12px">' + zoneTag(p, 'gear');
+  ['P', 'R', 'N', 'D'].forEach(function (g) {
+    var on = g === p.gear;
+    h += '<span style="width: ' + z(88, 72) + 'px; height: ' + z(76, 52) + 'px; box-sizing: border-box; display: flex; align-items: center; justify-content: center; border-radius: 12px; font-family: \'Barlow Semi Condensed\', sans-serif; font-size: ' + z(46, 34) + 'px; font-weight: 700; border: 2px solid ' + (on ? '#171A20' : '#E4E5E7') + '; background: ' + (on ? '#171A20' : 'transparent') + '; color: ' + (on ? '#FFFFFF' : '#8E8E93') + '">' + g + '</span>';
+  });
+  h += '</div>';
+
+  h += '<div style="width: 100%; max-width: 640px; display: flex; flex-direction: column; gap: 12px">' +
+    '<div' + zoneAttr(p, 'throttle') + 'display: flex; align-items: center; gap: 14px">' + zoneTag(p, 'throttle') +
+    '<span style="width: 90px; font-size: 16px; font-weight: 600; letter-spacing: 0.06em; color: #5C5E62">THROTTLE</span>' +
+    '<div style="flex-grow: 1; position: relative; height: 14px; border-radius: 7px; background: #E4E5E7">' +
+    '<div style="height: 14px; border-radius: 7px; background: ' + accent + '; width: ' + pct(applied) + '"></div>' +
+    '<div style="position: absolute; top: -5px; width: 4px; height: 24px; border-radius: 2px; transform: translateX(-50%); background: #171A20; left: ' + pct(pedal) + '"></div>' +
+    '</div>' +
+    '<span style="width: 56px; text-align: right; font-size: 18px; font-variant-numeric: tabular-nums">' + esc(applied) + '%</span></div>' +
+    '<div' + zoneAttr(p, 'brake') + 'display: flex; align-items: center; gap: 14px">' + zoneTag(p, 'brake') +
+    '<span style="width: 90px; font-size: 16px; font-weight: 600; letter-spacing: 0.06em; color: #5C5E62">BRAKE</span>' +
+    '<div style="flex-grow: 1; height: 14px; border-radius: 7px; background: #E4E5E7">' +
+    '<div style="height: 14px; border-radius: 7px; background: #D97706; width: ' + pct(brake) + '"></div></div>' +
+    '<span style="width: 56px; text-align: right; font-size: 18px; font-variant-numeric: tabular-nums">' + esc(brake) + '%</span></div>' +
+    '<div style="display: flex; align-items: center; justify-content: space-between">' +
+    '<span style="font-size: 15px; color: #5C5E62">Bar = applied throttle · dark line = your pedal (' + esc(pedal) + '%)</span>' +
+    '<span style="padding: 4px 12px; border-radius: 999px; font-size: 15px; font-weight: 700; background: ' + pedalStatus.bg + '; color: ' + pedalStatus.fg + '">' + pedalStatus.text + '</span>' +
+    '</div></div>';
+  h += '</section>';
+
+  // Drivetrain column
+  h += '<section aria-label="Drivetrain" style="width: 560px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px">' +
+    '<h2 style="margin: 0; font-size: 15px; font-weight: 600; letter-spacing: 0.08em; color: #5C5E62">DRIVETRAIN</h2>' +
+    '<div' + zoneAttr(p, 'driveMode') + 'flex-grow: 1; box-sizing: border-box; padding: ' + z(22, 12) + 'px; border-radius: 16px; border: 2px solid #E4E5E7; background: #FFFFFF; display: flex; flex-direction: column; justify-content: space-between">' + zoneTag(p, 'driveMode') +
+    '<span style="font-size: 24px; font-weight: 600">Drive mode</span>' +
+    '<div style="display: flex; gap: 6px; padding: 6px; border-radius: 12px; background: #F2F3F5">';
+  ['Eco', 'Normal', 'Dynamic'].forEach(function (m) {
+    var on = m === p.driveMode;
+    h += '<span style="flex-grow: 1; flex-basis: 0; text-align: center; padding: ' + z('14px 0', '8px 0') + '; border-radius: 8px; font-size: 22px; font-weight: 600; background: ' + (on ? accent : 'transparent') + '; color: ' + (on ? '#FFFFFF' : '#5C5E62') + '">' + m + '</span>';
+  });
+  h += '</div>' +
+    '<div style="display: flex; justify-content: space-between; font-size: 16px; color: #5C5E62">' +
+    '<span>‹ Left paddle</span><span>Right paddle ›</span></div></div>';
+
+  h += '<div' + zoneAttr(p, 'regen') + 'flex-grow: 1; box-sizing: border-box; padding: ' + z(22, 12) + 'px; border-radius: 16px; border: 2px solid #E4E5E7; background: #FFFFFF; display: flex; flex-direction: column; justify-content: space-between">' + zoneTag(p, 'regen') +
+    '<div style="display: flex; align-items: baseline; justify-content: space-between">' +
+    '<span style="font-size: 24px; font-weight: 600">Regenerative braking</span>' +
+    '<span style="font-family: \'Barlow Semi Condensed\', sans-serif; font-size: 34px; font-weight: 600; color: ' + accent + '">' + regenNames[regen] + '</span>' +
+    '</div><div style="display: flex; gap: 8px">';
+  [1, 2, 3].forEach(function (n) {
+    var on = n <= regen;
+    h += '<div style="flex-grow: 1; flex-basis: 0; display: flex; flex-direction: column; gap: 8px">' +
+      '<span style="display: block; height: 16px; border-radius: 4px; background: ' + (on ? accent : '#E4E5E7') + '"></span>' +
+      '<span style="font-size: 15px; text-align: center; color: ' + (on ? '#171A20' : '#8E8E93') + '">' + regenNames[n] + '</span></div>';
+  });
+  h += '</div>' +
+    '<div style="display: flex; justify-content: space-between; font-size: 16px; color: #5C5E62">' +
+    '<span>How hard the car slows when you lift off</span><span>Wheel buttons ▲ ▼</span></div></div>';
+  h += '</section></main>';
+
+  return h;
+}
+
+// The movement a tip asks for, drawn on the tip panel. Each loops: the
+// starting position, the movement, a hold, then a fade back to the start.
+var GESTURES = {
+  'release-throttle':
+    '<svg width="260" height="130" viewBox="40 40 320 160" fill="none" aria-hidden="true">' +
+    '<defs><linearGradient id="g-shin" x1="0" y1="1" x2="0" y2="0"><stop offset="0.35" stop-color="#D0D1D2"></stop><stop offset="1" stop-color="#D0D1D2" stop-opacity="0"></stop></linearGradient>' +
+    '<linearGradient id="g-shin-edge" x1="0" y1="1" x2="0" y2="0"><stop offset="0.35" stop-color="#171A20"></stop><stop offset="1" stop-color="#171A20" stop-opacity="0"></stop></linearGradient></defs>' +
+    '<line x1="44" y1="170" x2="356" y2="170" stroke="#D0D1D2" stroke-width="3" stroke-linecap="round"></line>' +
+    '<text x="210" y="192" text-anchor="middle" font-family="Barlow, sans-serif" font-size="16" font-weight="700" letter-spacing="1.5" fill="#8E8E93">ACCELERATOR</text>' +
+    '<g class="g-loop">' +
+    '<g class="g-pedal"><rect x="210" y="161" width="92" height="14" rx="6" fill="var(--accent)"></rect></g>' +
+    '<circle cx="210" cy="168" r="7" fill="#8E8E93"></circle>' +
+    '<g class="g-foot" stroke-width="3" stroke-linejoin="round">' +
+    '<path d="M112 104 L148 96 L122 30 L80 30 Z" fill="url(#g-shin)" stroke="url(#g-shin-edge)"></path>' +
+    '<path d="M80 170 L268 147 Q284 144 278 128 L146 96 Q124 90 112 102 L78 136 Q68 158 80 170 Z" fill="#D0D1D2" stroke="#171A20"></path>' +
+    '</g>' +
+    '<path class="g-arrow" d="M330 124 L330 72 M314 88 L330 72 L346 88" stroke="var(--accent)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"></path>' +
+    '</g></svg>',
+  'press-brake':
+    '<svg width="260" height="130" viewBox="40 40 320 160" fill="none" aria-hidden="true">' +
+    '<defs><linearGradient id="g-shin" x1="0" y1="1" x2="0" y2="0"><stop offset="0.35" stop-color="#D0D1D2"></stop><stop offset="1" stop-color="#D0D1D2" stop-opacity="0"></stop></linearGradient>' +
+    '<linearGradient id="g-shin-edge" x1="0" y1="1" x2="0" y2="0"><stop offset="0.35" stop-color="#171A20"></stop><stop offset="1" stop-color="#171A20" stop-opacity="0"></stop></linearGradient></defs>' +
+    '<line x1="44" y1="170" x2="356" y2="170" stroke="#D0D1D2" stroke-width="3" stroke-linecap="round"></line>' +
+    '<text x="210" y="192" text-anchor="middle" font-family="Barlow, sans-serif" font-size="16" font-weight="700" letter-spacing="1.5" fill="#8E8E93">BRAKE</text>' +
+    '<g class="g-loop">' +
+    '<g class="g-pedal-press"><rect x="210" y="161" width="92" height="14" rx="6" fill="#D97706"></rect></g>' +
+    '<circle cx="210" cy="168" r="7" fill="#8E8E93"></circle>' +
+    '<g class="g-foot-press" stroke-width="3" stroke-linejoin="round">' +
+    '<path d="M112 104 L148 96 L122 30 L80 30 Z" fill="url(#g-shin)" stroke="url(#g-shin-edge)"></path>' +
+    '<path d="M80 170 L268 147 Q284 144 278 128 L146 96 Q124 90 112 102 L78 136 Q68 158 80 170 Z" fill="#D0D1D2" stroke="#171A20"></path>' +
+    '</g>' +
+    '<path class="g-arrow-down" d="M330 72 L330 124 M314 108 L330 124 L346 108" stroke="#D97706" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"></path>' +
+    '</g></svg>'
+};
+
+// press-throttle: the same foot on the accelerator, in the accent colour.
+GESTURES['press-throttle'] = GESTURES['press-brake'].replace('>BRAKE<', '>ACCELERATOR<')
+  .split('#D97706').join('var(--accent)');
+
+// The G25's controls a tip can point at, on a drawing of the part they are
+// on. Each button is {x, y}, red for the red ones, r its radius when it is
+// not the usual 9, and a = the angle of a paddle (drawn as a bar).
+var DEVICES = {
+  // The shifter unit, as the reference sheet places its buttons: the silver
+  // panel (speed up at the top, down below; left and right unused), the
+  // d-pad (up gap -, down gap +) and the red row: cruise control, adaptive
+  // cruise, the autopilot, one unused. Its body runs on below the edge,
+  // with the H-gate.
+  shifter: {
+    where: 'top of the shifter',
+    base: '<rect x="18" y="4" width="124" height="190" rx="38" fill="#F7F7F8" stroke="#D0D1D2" stroke-width="2"></rect>' +
+      '<rect x="32" y="12" width="96" height="70" rx="12" fill="#E4E5E7" stroke="#D0D1D2" stroke-width="1.5"></rect>' +
+      '<path d="M80 86 V112 M67 99 H93" stroke="#E4E5E7" stroke-width="11" stroke-linecap="round"></path>' +
+      '<path d="M56 144 V148 M80 144 V148 M104 144 V148" stroke="#D0D1D2" stroke-width="3" stroke-linecap="round"></path>',
+    buttons: {
+      'speed-up': { x: 80, y: 28 }, 'silver-left': { x: 60, y: 46 }, 'silver-right': { x: 100, y: 46 }, 'speed-down': { x: 80, y: 64 },
+      'dpad-up': { x: 80, y: 90, r: 5 }, 'dpad-down': { x: 80, y: 108, r: 5 },
+      'cc': { x: 44, y: 124, red: true }, 'acc': { x: 68, y: 124, red: true },
+      'autopilot': { x: 92, y: 124, red: true }, 'red-4': { x: 116, y: 124, red: true }
+    }
+  },
+  // The wheel from the driver's seat: the paddles behind its rim at ten and
+  // two (drive mode down and up), the red buttons on its spokes (regen).
+  wheel: {
+    where: 'on the steering wheel',
+    base: '<path d="M62 80 H28 M98 80 H132 M80 96 V128" stroke="#E4E5E7" stroke-width="16" stroke-linecap="round"></path>' +
+      '<circle cx="80" cy="74" r="54" stroke="#D0D1D2" stroke-width="11"></circle>' +
+      '<circle cx="80" cy="78" r="19" fill="#E4E5E7" stroke="#D0D1D2" stroke-width="2"></circle>' +
+      '<circle cx="80" cy="78" r="5" fill="#A2A3A5"></circle>',
+    buttons: {
+      'paddle-left': { x: 37, y: 27, a: -42 }, 'paddle-right': { x: 123, y: 27, a: 42 },
+      'regen-down': { x: 46, y: 80, red: true }, 'regen-up': { x: 114, y: 80, red: true }
+    }
+  }
+};
+
+// A button's shape, with a class and attributes of its own.
+function buttonShape(b, cls, attrs) {
+  cls = cls ? ' class="' + cls + '"' : '';
+  if (b.a !== undefined) {
+    return '<g transform="rotate(' + b.a + ' ' + b.x + ' ' + b.y + ')"><rect' + cls + ' x="' + (b.x - 18) + '" y="' + (b.y - 7) + '" width="36" height="14" rx="6" ' + attrs + '></rect></g>';
+  }
+  return '<circle' + cls + ' cx="' + b.x + '" cy="' + b.y + '" r="' + (b.r || 9) + '" ' + attrs + '></circle>';
+}
+
+// A control tip's drawing: the part with the button or buttons to use lit,
+// pressing in (tap) or held while a ring fills (hold), and a leader line out
+// to its label.
+function controlSvg(c) {
+  var device = DEVICES[c.device] || DEVICES.shifter;
+  var names = [].concat(c.button).filter(function (n) { return device.buttons[n]; });
+  if (!names.length) names = [Object.keys(device.buttons)[0]];
+  var hold = c.press === 'hold';
+  var s = '<svg width="320" height="142" viewBox="0 0 330 146" fill="none" aria-hidden="true">' + device.base;
+  Object.keys(device.buttons).forEach(function (name) {
+    var b = device.buttons[name];
+    if (names.indexOf(name) < 0) s += buttonShape(b, '', 'fill="' + (b.red ? '#E8B4B4' : '#A2A3A5') + '"');
+  });
+  // The leader starts from the rightmost lit button.
+  var lead = names.map(function (n) { return device.buttons[n]; })
+    .reduce(function (a, b) { return b.x > a.x ? b : a; });
+  var tx = lead.x, ty = lead.y;
+  var labelY = Math.max(10, Math.min(52, ty - 22));
+  var chipW = 28 + c.label.length * 11.5;
+  // Straight out to the right, or under the row when buttons are in the way.
+  var blocked = Object.keys(device.buttons).some(function (name) {
+    var b = device.buttons[name];
+    return names.indexOf(name) < 0 && Math.abs(b.y - ty) < 10 && b.x > tx;
+  });
+  var leader = blocked ? 'M' + tx + ' ' + (ty + 12) + ' V' + (ty + 16) + ' H150 '
+    : 'M' + (tx + (lead.a !== undefined ? 20 : 14)) + ' ' + ty + ' H150 ';
+  s += '<path d="' + leader + 'L172 ' + (labelY + 18) + ' H186" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"></path>';
+  names.forEach(function (n) {
+    var b = device.buttons[n];
+    if (hold) {
+      s += buttonShape(b, 'c-held', 'fill="var(--accent)" stroke="#FFFFFF" stroke-width="2"') +
+        '<circle class="c-hold" cx="' + b.x + '" cy="' + b.y + '" r="16" stroke="var(--accent)" stroke-width="4" stroke-linecap="round" transform="rotate(-90 ' + b.x + ' ' + b.y + ')"></circle>';
+    } else {
+      s += buttonShape(b, 'c-ripple', 'stroke="var(--accent)" stroke-width="3"') +
+        buttonShape(b, 'c-tap', 'fill="var(--accent)" stroke="#FFFFFF" stroke-width="2"');
+    }
+  });
+  s += '<rect x="186" y="' + labelY + '" width="' + chipW + '" height="36" rx="8" stroke="var(--accent)" stroke-width="2.5"></rect>' +
+    '<text x="' + (186 + chipW / 2) + '" y="' + (labelY + 26) + '" text-anchor="middle" font-family="Barlow Semi Condensed, sans-serif" font-size="21" font-weight="700" fill="var(--accent)">' + esc(c.label) + '</text>' +
+    '<text x="188" y="' + (labelY + 58) + '" font-family="Barlow, sans-serif" font-size="15" font-weight="700" letter-spacing="1.2" fill="#171A20">' + esc(c.hint || (hold ? 'HOLD 1 SECOND' : 'PRESS ONCE')) + '</text>' +
+    '<text x="188" y="' + (labelY + 78) + '" font-family="Barlow, sans-serif" font-size="15" fill="#5C5E62">' + esc(c.where || device.where) + '</text>' +
+    '</svg>';
+  return s;
+}
+
+// The tip panel, drawn only when the tip changes so its animations run on.
+// It grows to TIP_HEIGHT while a tip shows, and the dashboard above compacts.
+var TIP_HEIGHT = 420;
+function renderTip(p) {
+  var accent = p.accent;
+  if (!p.showTip) {
+    var idle = '<section aria-label="Manual tip" style="height: 236px; flex-shrink: 0; box-sizing: border-box; padding: 26px 32px; border-radius: 20px; border: 2px dashed ' + (p.manual ? '#C5D3F5' : '#E4E5E7') + '; display: flex; flex-direction: column; gap: 12px; align-items: center; justify-content: center">';
+    if (!p.manual) {
+      return idle + '<span style="font-size: 22px; color: #5C5E62">Context-aware manual is off. Press B to start it.</span></section>';
+    }
+    if (p.freeDrive) {
+      return idle + '<span style="font-family: \'Barlow Semi Condensed\', sans-serif; font-size: 40px; font-weight: 700; letter-spacing: 0.04em; color: ' + accent + '">FREE DRIVE</span>' +
+        '<span style="font-size: 22px; color: #393C41">No tips for now. Drive as you like, and use any feature you want.</span>' +
+        '<span style="font-size: 19px; color: #8E8E93">' + esc(p.contextStatus || '') + '</span></section>';
+    }
+    var dots = '';
+    var progress = p.tipProgress || [0, 0];
+    for (var i = 0; i < progress[1]; i++) {
+      dots += '<span style="width: 12px; height: 12px; border-radius: 50%; ' + (i < progress[0] ? 'background: ' + accent : 'border: 2px solid #D0D1D2; box-sizing: border-box') + '"></span>';
+    }
+    return idle + '<span style="font-size: 22px; color: #393C41">Tips appear here at a calm moment, when they are useful.</span>' +
+      '<div style="display: flex; align-items: center; gap: 14px">' +
+      (dots ? '<div style="display: flex; gap: 6px">' + dots + '</div>' : '') +
+      '<span style="font-size: 17px; color: #8E8E93">' + esc(p.contextStatus || '') + '</span></div></section>';
+  }
+  var tip = p.tip || SAMPLE_TIP;
+  // What to do comes first, drawn large on the left; the explanation follows.
+  var heading = '<span style="font-size: 17px; font-weight: 700; letter-spacing: 0.08em; color: #5C5E62">WHAT TO DO</span>';
+  var actionLine = '<span style="font-size: 26px; font-weight: 600; text-align: center; color: #171A20">' + esc(tip.action || '') + '</span>';
+  var visual;
+  if (tip.score) {
+    var rows = '';
+    tip.score.parts.forEach(function (part) {
+      var colour = part.score >= 80 ? '#1E9E52' : (part.score >= 50 ? accent : '#D97706');
+      rows += '<div style="display: flex; align-items: center; gap: 14px">' +
+        '<span style="width: 150px; font-size: 20px; font-weight: 600; color: #393C41">' + esc(part.name) + '</span>' +
+        '<div style="flex-grow: 1; height: 14px; border-radius: 7px; background: #E4E5E7">' +
+        '<div style="height: 14px; border-radius: 7px; background: ' + colour + '; width: ' + pct(part.score) + '"></div></div>' +
+        '<span style="width: 44px; text-align: right; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums">' + esc(part.score) + '</span></div>';
+    });
+    visual = '<span style="font-size: 17px; font-weight: 700; letter-spacing: 0.08em; color: #5C5E62">YOUR DRIVING SCORE</span>' +
+      '<div style="flex-grow: 1; display: flex; align-items: center; gap: 36px">' +
+      '<div style="display: flex; flex-direction: column; align-items: center">' +
+      '<span style="font-family: \'Barlow Semi Condensed\', sans-serif; font-size: 132px; font-weight: 700; line-height: 0.9; color: ' + accent + '">' + esc(tip.score.total) + '</span>' +
+      '<span style="font-size: 20px; color: #5C5E62">out of 100</span></div>' +
+      '<div style="flex-grow: 1; display: flex; flex-direction: column; gap: 14px">' + rows + '</div></div>';
+  } else if (tip.complete) {
+    visual = heading +
+      '<div style="flex-grow: 1; display: flex; align-items: center; justify-content: center; gap: 28px">' +
+      '<svg width="160" height="160" viewBox="0 0 84 84" fill="none" aria-hidden="true"><circle cx="42" cy="42" r="38" fill="#E7F6EC" stroke="#1E9E52" stroke-width="3"></circle>' +
+      '<path class="d-tick" d="M25 43 L37 55 L60 30" stroke="#1E9E52" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"></path></svg>' +
+      '<span style="font-family: \'Barlow Semi Condensed\', sans-serif; font-size: 72px; font-weight: 700; color: #1E9E52">Done</span></div>';
+  } else if (tip.control) {
+    visual = heading +
+      '<div style="flex-grow: 1; display: flex; align-items: center; justify-content: center"><div style="zoom: 2">' + controlSvg(tip.control) + '</div></div>' +
+      actionLine;
+  } else if (tip.gesture && GESTURES[tip.gesture]) {
+    visual = heading +
+      '<div style="flex-grow: 1; display: flex; align-items: center; justify-content: center"><div style="zoom: 2">' + GESTURES[tip.gesture] + '</div></div>' +
+      actionLine;
+  } else {
+    visual = '<span style="font-size: 17px; font-weight: 700; letter-spacing: 0.08em; color: #5C5E62">CONTROL</span>' +
+      '<div style="flex-grow: 1; display: flex; align-items: center; justify-content: center; gap: 24px">' +
+      '<span style="min-width: 140px; height: 96px; box-sizing: border-box; padding: 0 26px; display: flex; align-items: center; justify-content: center; border-radius: 16px; border: 3px solid ' + accent + '; font-family: \'Barlow Semi Condensed\', sans-serif; font-size: 46px; font-weight: 700; color: ' + accent + '">' + esc(tip.key) + '</span>' +
+      '<span style="font-size: 24px; line-height: 1.3; color: #393C41">On the G25:<br>' + esc(tip.input) + '</span>' +
+      '</div>';
+  }
+  return '<section aria-label="Manual tip" class="tip-in" style="height: ' + TIP_HEIGHT + 'px; flex-shrink: 0; box-sizing: border-box; padding: 28px 36px; border-radius: 20px; background: #FFFFFF; border: 2px solid #C5D3F5; display: flex; gap: 44px">' +
+    '<div style="width: 700px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; padding-right: 44px; border-right: 1px solid #E4E5E7">' +
+    visual + '</div>' +
+    '<div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 16px">' +
+    '<div style="display: flex; align-items: center; gap: 12px">' +
+    '<span style="font-size: 17px; font-weight: 700; letter-spacing: 0.08em; color: ' + (tip.complete ? '#1E9E52' : accent) + '">' + (tip.score ? 'FINAL TIP' : (tip.complete ? 'NICE ONE' : 'MANUAL TIP')) + '</span></div>' +
+    '<h3 style="margin: 0; font-size: 46px; font-weight: 600; line-height: 1.12">' + esc(tip.title) + '</h3>' +
+    '<p style="margin: 0; font-size: 27px; line-height: 1.4; color: #393C41">' + esc(tip.body) + '</p>' +
+    '<span style="font-size: 19px; color: #5C5E62">' + esc(tip.why) + '</span></div></section>';
+}
+
+// ==== The minimal layout =====================================================
+// Speed takes the left panel; the right side stays clear (a lane view) until
+// something is in use or a tip names it: an assist that is on (or on
+// standby) pops out its card, a drive mode or regen change pops out its card
+// for MINI_POP_MS, and a tip's zones (tip.highlight, or the dashed expect)
+// pop theirs out too. The tip itself is one short card with the control to
+// use drawn on it, and grey lines at the bottom say what the manual is doing
+// (manualStatus).
+
+var COND = "'Barlow Semi Condensed', sans-serif";
+var MINI_POP_MS = 3000;
+
+// Line icons, drawn in currentColor on a 48 x 48 grid.
+function icon(name, size) {
+  var paths = {
+    cruise: '<path d="M8 34a17 17 0 1 1 32 0"></path><path d="M24 30 L32 18"></path><circle cx="24" cy="30" r="3" fill="currentColor"></circle>',
+    acc: '<rect x="14" y="4" width="20" height="15" rx="5"></rect><path d="M18 14 H30"></path><path d="M12 27 H36 M15 34 H33 M18 41 H30"></path>',
+    autopilot: '<circle cx="24" cy="24" r="18"></circle><circle cx="24" cy="26" r="5"></circle><path d="M6.5 22 H19 M29 22 H41.5 M24 31 V42"></path>',
+    Eco: '<path d="M9 39 C9 19 22 8 40 8 C40 27 29 39 11 39 Z"></path><path d="M9 39 L27 21"></path>',
+    Normal: '<path d="M5 33 V26 L12 17 H33 L41 26 H43 V33 Z"></path><circle cx="14" cy="34" r="4" fill="#FFFFFF"></circle><circle cx="34" cy="34" r="4" fill="#FFFFFF"></circle>',
+    Dynamic: '<path d="M27 4 L10 27 H23 L20 44 L38 20 H25 Z"></path>',
+    regen: '<rect x="4" y="13" width="34" height="22" rx="5"></rect><path d="M42 20 V28"></path>'
+  };
+  return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths[name] + '</svg>';
+}
+
+// The regen icon with its level filled in: 0 to 3 bars inside the battery.
+function regenIcon(level, size, colour) {
+  var bars = '';
+  for (var n = 0; n < 3; n++) {
+    bars += '<rect x="' + (9 + n * 9.5) + '" y="18" width="6" height="12" rx="1.5" fill="' + (n < level ? colour : '#E4E5E7') + '" stroke="none"></rect>';
+  }
+  return icon('regen', size).replace('</svg>', bars + '</svg>');
+}
+
+function family(assist) {
+  return assist.indexOf('Cruise') === 0 ? 'cruise' : (assist.indexOf('ACC') === 0 ? 'acc' : (assist === 'Autopilot' ? 'autopilot' : null));
+}
+
+// Which cards the right side wants, and when they came or went.
+var miniCards = {};
+var lastMode = null, lastRegen = null, modeAt = 0, regenAt = 0;
+var CARD_ORDER = ['cruise', 'acc', 'autopilot', 'driveMode', 'regen'];
+
+function miniWants(p, now) {
+  var fam = family(p.activeAssist);
+  function named(z) { return zoneOn(p, z) || zoneExpect(p, z); }
+  if (lastMode !== null && p.driveMode !== lastMode) modeAt = now;
+  if (lastRegen !== null && p.regenLevel !== lastRegen) regenAt = now;
+  lastMode = p.driveMode;
+  lastRegen = p.regenLevel;
+  return {
+    cruise: fam === 'cruise' || (!fam && named('cruise')),
+    acc: fam === 'acc' || (!fam && named('acc')),
+    autopilot: fam === 'autopilot' || named('autopilot'),
+    driveMode: now - modeAt < MINI_POP_MS || named('driveMode'),
+    regen: now - regenAt < MINI_POP_MS || named('regen')
+  };
+}
+
+function miniCard(p, name) {
+  var accent = p.accent;
+  var assist = p.activeAssist;
+  var on = family(assist) === name;
+  var standby = on && / standby$/.test(assist);
+  var colour = !on ? '#A2A3A5' : (standby ? '#D97706' : accent);
+  var border = !on ? '#E4E5E7' : (standby ? '#F0C27C' : accent);
+  var bg = !on ? '#FFFFFF' : (standby ? '#FFF8ED' : '#EAF0FD');
+  var attr = zoneAttr(p, name);
+  if (name === 'autopilot' && on && !zoneOn(p, name)) {
+    attr = ' class="ap-live" style="animation-delay: -' + (Date.now() - autopilotSince) + 'ms; ';
+  }
+  if (name === 'driveMode' || name === 'regen') { border = '#E4E5E7'; bg = '#FFFFFF'; }
+  var open = '<div' + attr + 'width: 600px; height: 124px; box-sizing: border-box; padding: 0 32px; border-radius: 20px; border: 2px solid ' + border + '; background: ' + bg + '; display: flex; align-items: center; gap: 28px">' + zoneTag(p, name);
+  function speedText(v) {
+    return '<div style="display: flex; align-items: baseline; gap: 10px; flex-grow: 1">' +
+      '<span style="font-family: ' + COND + '; font-size: 76px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; color: ' + (on ? '#171A20' : '#A2A3A5') + '">' + (on && v !== null ? esc(v) : '–') + '</span>' +
+      '<span style="font-size: 22px; color: #5C5E62">km/h</span></div>';
+  }
+  function chipText(text, fg, cbg) {
+    return '<span style="padding: 6px 14px; border-radius: 8px; font: 700 20px ' + COND + '; letter-spacing: 0.06em; background: ' + cbg + '; color: ' + fg + '">' + text + '</span>';
+  }
+  if (name === 'cruise') {
+    return open + '<span style="color: ' + colour + '">' + icon('cruise', 64) + '</span>' + speedText(p.setSpeed) +
+      (standby ? chipText('PRESS CC', '#D97706', '#FDEDD3') : '') + '</div>';
+  }
+  // The gap to the car ahead, the d-pad's setting: the same for ACC and the autopilot.
+  var gap = Math.max(1, Math.min(4, p.accGap));
+  var bars = '';
+  [4, 3, 2, 1].forEach(function (n) {
+    bars += '<span style="display: block; height: 6px; border-radius: 3px; width: ' + (22 + (5 - n) * 12) + 'px; background: ' + (n <= gap ? colour : '#E4E5E7') + '"></span>';
+  });
+  if (name === 'acc') {
+    var lead = on ? p.accLead : null;
+    var leadCar = '<svg width="32" height="22" viewBox="0 0 40 26" fill="none" stroke="' + (lead !== null ? colour : '#E4E5E7') + '" stroke-width="3" aria-hidden="true"><rect x="8" y="2" width="24" height="22" rx="6"></rect><line x1="12" y1="17" x2="28" y2="17"></line></svg>';
+    var side = (p.accWaiting && on) || standby ? chipText('PRESS ACC', '#D97706', '#FDEDD3')
+      : '<span style="width: 72px; text-align: right; font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; color: #5C5E62">' + (lead !== null ? esc(lead) + ' m' : '') + '</span>';
+    return open + '<span style="color: ' + colour + '">' + icon('acc', 64) + '</span>' + speedText(p.setSpeed) +
+      '<div style="display: flex; flex-direction: column; align-items: center; gap: 5px">' + leadCar + bars + '</div>' + side + '</div>';
+  }
+  if (name === 'autopilot') {
+    var apCar = '<svg width="32" height="22" viewBox="0 0 40 26" fill="none" stroke="' + colour + '" stroke-width="3" aria-hidden="true"><rect x="8" y="2" width="24" height="22" rx="6"></rect><line x1="12" y1="17" x2="28" y2="17"></line></svg>';
+    var apSide = on && p.throttleOverride ? chipText('YOU', '#D97706', '#FDEDD3')
+      : '<span style="width: 72px; text-align: right; font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; color: #5C5E62">' + (on ? esc(p.apDistance) + ' m' : '') + '</span>';
+    return open + '<span style="color: ' + colour + '">' + icon('autopilot', 64) + '</span>' + speedText(p.apTarget) +
+      '<div style="display: flex; flex-direction: column; align-items: center; gap: 5px">' + apCar + bars + '</div>' + apSide + '</div>';
+  }
+  if (name === 'driveMode') {
+    var modes = '';
+    ['Eco', 'Normal', 'Dynamic'].forEach(function (m) {
+      var sel = m === p.driveMode;
+      modes += '<span style="flex-grow: 1; flex-basis: 0; height: 76px; display: flex; align-items: center; justify-content: center; border-radius: 12px; background: ' + (sel ? accent : 'transparent') + '; color: ' + (sel ? '#FFFFFF' : '#A2A3A5') + '">' +
+        icon(m, 46).replace(/fill="#FFFFFF"/g, 'fill="' + (sel ? accent : '#F2F3F5') + '"') + '</span>';
+    });
+    return open + '<div style="flex-grow: 1; display: flex; gap: 6px; padding: 6px; border-radius: 16px; background: #F2F3F5">' + modes + '</div></div>';
+  }
+  var regen = Math.max(0, Math.min(3, p.regenLevel));
+  var steps = '';
+  [1, 2, 3].forEach(function (n) {
+    steps += '<span style="flex-grow: 1; flex-basis: 0; height: 22px; border-radius: 6px; background: ' + (n <= regen ? accent : '#E4E5E7') + '"></span>';
+  });
+  return open + '<span style="color: ' + (regen ? accent : '#A2A3A5') + '">' + regenIcon(regen, 64, regen ? accent : '#A2A3A5') + '</span>' +
+    '<div style="flex-grow: 1; display: flex; gap: 8px">' + steps + '</div></div>';
+}
+
+function renderMiniCards(p) {
+  var now = Date.now();
+  var want = miniWants(p, now);
+  var h = '';
+  CARD_ORDER.forEach(function (name) {
+    var c = miniCards[name];
+    if (want[name]) {
+      if (!c || c.leaving) c = miniCards[name] = { since: now - (c && c.leaving ? Math.max(0, 450 - (now - c.leaving)) : 0) };
+    } else if (c && !c.leaving) {
+      c.leaving = now;
+    } else if (c && now - c.leaving > 350) {
+      delete miniCards[name];
+      c = null;
+    }
+    if (!c) return;
+    var cls = c.leaving ? 'pop-out' : 'pop-in';
+    var since = c.leaving || c.since;
+    h += '<div class="' + cls + '" style="animation-delay: -' + (now - since) + 'ms">' + miniCard(p, name) + '</div>';
+  });
+  return h;
+}
+
+function renderMiniLeft(p) {
+  var accent = p.accent;
+  var assist = p.activeAssist;
+  var speed = p.speed;
+  var fam = family(assist);
+  var standby = / standby$/.test(assist);
+  var marker = fam === 'autopilot' ? p.apTarget : p.setSpeed;
+  var h = '<section aria-label="Speed" style="width: 720px; flex-shrink: 0; box-sizing: border-box; padding: 44px 56px; border-radius: 24px; background: #FFFFFF; border: 1px solid #E4E5E7; display: flex; flex-direction: column">';
+
+  // Top: the gear, and the manual while it runs.
+  h += '<div style="display: flex; align-items: center; justify-content: space-between">' +
+    '<div role="img" aria-label="Gear"' + zoneAttr(p, 'gear') + 'display: flex; gap: 6px; padding: 4px 8px">' + zoneTag(p, 'gear');
+  ['P', 'R', 'N', 'D'].forEach(function (g) {
+    var on = g === p.gear;
+    h += '<span style="width: 52px; text-align: center; font-family: ' + COND + '; font-size: 44px; font-weight: 700; color: ' + (on ? '#171A20' : '#C7C9CC') + '">' + g + '</span>';
+  });
+  h += '</div>' +
+    (p.manual ? '<span style="display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 600; color: ' + accent + '">' +
+      '<span class="ctx-dot" style="animation-delay: -' + (Date.now() - contextSince) + 'ms"></span>Manual</span>' : '') +
+    '</div>';
+
+  // Middle: the speed, and the set speed of the assist in use.
+  h += '<div style="flex-grow: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px">' +
+    '<div' + zoneAttr(p, 'speed') + 'display: flex; flex-direction: column; align-items: center; padding: 0 24px">' + zoneTag(p, 'speed') +
+    '<span style="font-family: ' + COND + '; font-size: 300px; font-weight: 600; line-height: 0.86; font-variant-numeric: tabular-nums; letter-spacing: -0.02em">' + (speed === null ? '–' : esc(speed)) + '</span>' +
+    '<span style="font-size: 30px; color: #5C5E62">km/h</span></div>' +
+    '<div style="height: 52px; display: flex; align-items: center">' +
+    (fam && marker !== null
+      ? '<span style="display: flex; align-items: center; gap: 10px; padding: 6px 16px 6px 12px; border-radius: 12px; background: ' + (standby ? '#FDEDD3' : '#EAF0FD') + '; color: ' + (standby ? '#D97706' : accent) + '">' +
+        icon(fam, 34) + '<span style="font-family: ' + COND + '; font-size: 32px; font-weight: 700">' + esc(marker) + '</span></span>'
+      : '') +
+    '</div></div>';
+
+  // The power bar: throttle to the right of the centre, brake to the left.
+  var applied = Math.max(0, Math.min(100, p.appliedThrottle));
+  var brake = Math.max(0, Math.min(100, p.brake));
+  var barZone = zoneOn(p, 'brake') && !zoneOn(p, 'throttle') ? 'brake' : 'throttle';
+  h += '<div' + zoneAttr(p, barZone) + 'align-self: center; width: 520px; padding: 10px 0">' + zoneTag(p, barZone) +
+    '<div style="position: relative; height: 12px; border-radius: 6px; background: #E4E5E7">' +
+    '<div style="position: absolute; left: 50%; height: 12px; border-radius: 0 6px 6px 0; background: #171A20; width: ' + (applied / 2) + '%"></div>' +
+    '<div style="position: absolute; right: 50%; height: 12px; border-radius: 6px 0 0 6px; background: #D97706; width: ' + (brake / 2) + '%"></div>' +
+    '<div style="position: absolute; left: 50%; top: -6px; width: 3px; height: 24px; border-radius: 2px; transform: translateX(-50%); background: #A2A3A5"></div>' +
+    '</div></div>';
+
+  // Bottom: the drive mode and regen, as icons.
+  var regen = Math.max(0, Math.min(3, p.regenLevel));
+  h += '<div style="display: flex; align-items: center; justify-content: center; gap: 36px; margin-top: 34px; color: #8E8E93">' +
+    '<span' + zoneAttr(p, 'driveMode') + 'display: flex; padding: 4px">' + zoneTag(p, 'driveMode') + icon(p.driveMode in { Eco: 1, Normal: 1, Dynamic: 1 } ? p.driveMode : 'Normal', 44) + '</span>' +
+    '<span' + zoneAttr(p, 'regen') + 'display: flex; padding: 4px">' + zoneTag(p, 'regen') + regenIcon(regen, 44, '#8E8E93') + '</span>' +
+    '</div>';
+  return h + '</section>';
+}
+
+// The lane ahead, behind the cards: your car, and what the assist in use
+// does. The autopilot lights up the lane, the car on rails, with the road
+// flowing past; ACC sends radar waves ahead and shows the gap to the car it
+// follows. On standby, or with no assist, it is the plain lane.
+function renderMiniRoad(p) {
+  var accent = p.accent;
+  var ap = p.activeAssist === 'Autopilot';
+  var acc = p.activeAssist === 'ACC';
+  var lead = acc ? p.accLead : null;
+  var s = '<svg width="560" height="760" viewBox="0 0 560 760" fill="none" aria-hidden="true">' +
+    '<defs><linearGradient id="rail-fill" x1="0" y1="0" x2="0" y2="1">' +
+    '<stop offset="0" stop-color="' + accent + '" stop-opacity="0"></stop>' +
+    '<stop offset="1" stop-color="' + accent + '" stop-opacity="0.22"></stop></linearGradient></defs>' +
+    '<path d="M150 0 L-60 760 M410 0 L620 760" stroke="#D0D1D2" stroke-width="4"></path>';
+  if (ap) {
+    // The lane, filled and edged in blue: rails the car runs on.
+    var flow = 'animation-delay: -' + (Date.now() - autopilotSince) + 'ms';
+    s += '<path d="M230 0 L330 0 L440 760 L120 760 Z" fill="url(#rail-fill)"></path>' +
+      '<path d="M230 0 L120 760 M330 0 L440 760" stroke="' + accent + '" stroke-opacity="0.25" stroke-width="18"></path>' +
+      '<path d="M230 0 L120 760 M330 0 L440 760" stroke="' + accent + '" stroke-width="6"></path>' +
+      '<path class="rail-flow" style="' + flow + '" d="M280 0 V586" stroke="' + accent + '" stroke-opacity="0.6" stroke-width="8" stroke-linecap="round" stroke-dasharray="20 40"></path>';
+  } else {
+    s += '<path d="M230 0 L120 760 M330 0 L440 760" stroke="#D0D1D2" stroke-width="4" stroke-dasharray="28 34"></path>';
+  }
+  if (acc) {
+    // Radar waves from the front of the car, one after another.
+    var since = Date.now() - accSince;
+    [0, 1, 2].forEach(function (n) {
+      s += '<path class="radar-wave" style="animation-delay: -' + (since + n * 600) + 'ms" d="M250 544 A60 60 0 0 1 310 544" stroke="' + accent + '" stroke-width="5" stroke-linecap="round"></path>';
+    });
+  }
+  s += '<rect x="238" y="600" width="84" height="132" rx="26" fill="#171A20"></rect>' +
+    '<rect x="252" y="628" width="56" height="30" rx="8" fill="#5C5E62"></rect>';
+  if (lead !== null) {
+    // 0 m just ahead of your car, 80 m and more near the horizon; the gap
+    // between them in metres beside the line.
+    var t = Math.max(0, Math.min(1, lead / 80));
+    var y = 470 - t * 400, w = 70 - t * 36, hgt = w * 1.5;
+    var top = y + hgt + 10, mid = (top + 590) / 2;
+    s += '<path d="M280 ' + top + ' V590" stroke="' + accent + '" stroke-width="5" stroke-linecap="round"></path>' +
+      '<path d="M266 ' + top + ' H294 M266 590 H294" stroke="' + accent + '" stroke-width="5" stroke-linecap="round"></path>' +
+      '<rect x="' + (280 - w / 2) + '" y="' + y + '" width="' + w + '" height="' + hgt + '" rx="' + (w * 0.3) + '" fill="#A2A3A5"></rect>' +
+      '<rect x="306" y="' + (mid - 24) + '" width="104" height="48" rx="12" fill="#FFFFFF" stroke="' + accent + '" stroke-width="2"></rect>' +
+      '<text x="358" y="' + (mid + 11) + '" text-anchor="middle" style="font: 700 32px ' + COND + '" fill="' + accent + '">' + esc(lead) + ' m</text>';
+  } else if (acc) {
+    s += '<text x="280" y="420" text-anchor="middle" style="font: 600 26px Barlow, sans-serif" fill="#8E8E93">No car ahead</text>';
+  }
+  return s + '</svg>';
+}
+
+// The tip, as one card: what to use drawn on the left, the title and the
+// action beside it. The why and what comes next are in the grey lines below.
+function renderMiniTip(p) {
+  if (!p.showTip) return '';
+  var accent = p.accent;
+  var tip = p.tip || SAMPLE_TIP;
+  var card = '<section aria-label="Manual tip" class="tip-in" style="width: 1000px; box-sizing: border-box; padding: 28px 40px; border-radius: 24px; background: #FFFFFF; border: 2px solid #C5D3F5; display: flex; align-items: center; gap: 40px">';
+  if (tip.score) {
+    var rows = '';
+    tip.score.parts.forEach(function (part) {
+      var colour = part.score >= 80 ? '#1E9E52' : (part.score >= 50 ? accent : '#D97706');
+      rows += '<div style="display: flex; align-items: center; gap: 14px">' +
+        '<span style="width: 150px; font-size: 20px; font-weight: 600; color: #393C41">' + esc(part.name) + '</span>' +
+        '<div style="flex-grow: 1; height: 12px; border-radius: 6px; background: #E4E5E7">' +
+        '<div style="height: 12px; border-radius: 6px; background: ' + colour + '; width: ' + pct(part.score) + '"></div></div>' +
+        '<span style="width: 44px; text-align: right; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums">' + esc(part.score) + '</span></div>';
+    });
+    return card + '<div style="display: flex; flex-direction: column; align-items: center; width: 260px; flex-shrink: 0">' +
+      '<span style="font-size: 17px; font-weight: 700; letter-spacing: 0.08em; color: #5C5E62">DRIVING SCORE</span>' +
+      '<span style="font-family: ' + COND + '; font-size: 150px; font-weight: 700; line-height: 0.95; color: ' + accent + '">' + esc(tip.score.total) + '</span>' +
+      '<span style="font-size: 20px; color: #5C5E62">out of 100</span></div>' +
+      '<div style="flex-grow: 1; display: flex; flex-direction: column; gap: 14px">' + rows + '</div></section>';
+  }
+  var visual;
+  if (tip.complete) {
+    visual = '<svg width="150" height="150" viewBox="0 0 84 84" fill="none" aria-hidden="true"><circle cx="42" cy="42" r="38" fill="#E7F6EC" stroke="#1E9E52" stroke-width="3"></circle>' +
+      '<path class="d-tick" d="M25 43 L37 55 L60 30" stroke="#1E9E52" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"></path></svg>';
+  } else if (tip.control) {
+    visual = '<div style="zoom: 1.3">' + controlSvg(tip.control) + '</div>';
+  } else if (tip.gesture && GESTURES[tip.gesture]) {
+    visual = '<div style="zoom: 1.5">' + GESTURES[tip.gesture] + '</div>';
+  } else {
+    visual = '<span style="min-width: 140px; height: 96px; box-sizing: border-box; padding: 0 26px; display: flex; align-items: center; justify-content: center; border-radius: 16px; border: 3px solid ' + accent + '; font-family: ' + COND + '; font-size: 46px; font-weight: 700; color: ' + accent + '">' + esc(tip.key) + '</span>';
+  }
+  return card + '<div style="width: 420px; flex-shrink: 0; display: flex; justify-content: center">' + visual + '</div>' +
+    '<div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px">' +
+    '<span style="font-size: 18px; font-weight: 700; letter-spacing: 0.08em; color: ' + (tip.complete ? '#1E9E52' : accent) + '">' + (tip.complete ? 'NICE ONE' : 'TIP') + '</span>' +
+    '<h3 style="margin: 0; font-size: 40px; font-weight: 600; line-height: 1.15">' + esc(tip.title) + '</h3>' +
+    '<span style="font-size: 26px; line-height: 1.35; color: #393C41">' + esc(tip.complete ? (tip.body || '') : (tip.action || tip.input || '')) + '</span>' +
+    '</div></section>';
+}
+
+// The grey lines at the bottom: tip progress, why now is or is not a moment
+// for a tip, and what has to happen before the next one.
+function renderMiniStatus(p) {
+  if (!p.manual) return '';
+  var line = 'display: flex; align-items: center; gap: 14px; font-size: 22px; line-height: 1.3; color: #8E8E93';
+  var h = '<div style="position: absolute; left: 0; right: 0; bottom: 0; display: flex; flex-direction: column; gap: 8px; align-items: center">';
+  if (p.freeDrive) {
+    return h + '<span style="' + line + '"><span style="font-weight: 700; letter-spacing: 0.06em; color: ' + p.accent + '">FREE DRIVE</span>No tips for now · ' + esc(p.contextStatus || '') + '</span></div>';
+  }
+  if (p.showTip && p.tip && p.tip.score) return '';
+  var ms = p.manualStatus || {};
+  var dots = '';
+  var progress = p.tipProgress || [0, 0];
+  for (var i = 0; i < progress[1]; i++) {
+    dots += '<span style="width: 11px; height: 11px; box-sizing: border-box; border-radius: 50%; ' + (i < progress[0] ? 'background: ' + p.accent : 'border: 2px solid #C7C9CC') + '"></span>';
+  }
+  var first = ms.moment || ms.next || p.contextStatus;
+  var second = ms.moment ? ms.next : null;
+  if (first) h += '<span style="' + line + '">' + (dots ? '<span style="display: flex; gap: 5px">' + dots + '</span>' : '') + esc(first) + '</span>';
+  if (second) h += '<span style="' + line + '">' + esc(second) + '</span>';
+  return h + '</div>';
+}
+
+// Chimes, made with Web Audio so there is no sound file; the browser is
+// started with autoplay allowed. Each is a list of [frequency (Hz), start
+// (s), length (s)] notes in one voice. Rising is on, falling is off, and
+// autopilot's are three notes to ACC's two, so they are told apart unseen.
+var CHIMES = {
+  tip: { wave: 'sine', volume: 0.16, notes: [[659.25, 0, 1.3], [987.77, 0.16, 1.3]] },
+  // A tip done: a quick bright rise, shorter than the tip's own.
+  tipDone: { wave: 'sine', volume: 0.14, notes: [[783.99, 0, 0.35], [1046.5, 0.09, 0.35], [1318.5, 0.18, 0.8]] },
+  accOn: { wave: 'triangle', volume: 0.2, notes: [[587.33, 0, 0.5], [880.0, 0.12, 0.7]] },
+  accOff: { wave: 'triangle', volume: 0.2, notes: [[880.0, 0, 0.5], [587.33, 0.12, 0.7]] },
+  autopilotOn: { wave: 'sine', volume: 0.18, notes: [[523.25, 0, 0.9], [659.25, 0.11, 0.9], [783.99, 0.22, 0.9], [1046.5, 0.33, 1.4]] },
+  // Handing the car back: falling, then a low note held with its octave
+  // below for weight, so it is noticed without sounding harsh.
+  autopilotOff: { wave: 'sine', volume: 0.2, notes: [[783.99, 0, 0.5], [659.25, 0.14, 0.5], [523.25, 0.28, 0.5], [392.0, 0.42, 1.4], [196.0, 0.42, 1.4]] }
+};
+var audio = null;
+function chime(name) {
+  var c = CHIMES[name];
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    if (audio.state === 'suspended') audio.resume();
+    var t = audio.currentTime + 0.03;
+    c.notes.forEach(function (note) {
+      var osc = audio.createOscillator();
+      var gain = audio.createGain();
+      var start = t + note[1];
+      osc.type = c.wave;
+      osc.frequency.value = note[0];
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(c.volume, start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + note[2]);
+      osc.connect(gain);
+      gain.connect(audio.destination);
+      osc.start(start);
+      osc.stop(start + note[2] + 0.1);
+    });
+  } catch (e) { /* no audio: the dashboard still shows it */ }
+}
+
+// The EV hum, for a sense of motion: a motor whine whose pitch follows the
+// speed and grows louder under load (throttle or regen), over road and wind
+// noise that grows with the speed. Silent at a standstill.
+var hum = null;
+function updateHum() {
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    if (audio.state === 'suspended') audio.resume();
+    if (!hum) {
+      hum = { out: audio.createGain() };
+      hum.out.gain.value = 0;
+      hum.out.connect(audio.destination);
+      // Whine: a fundamental and a quieter, slightly detuned 3rd harmonic.
+      hum.whine = audio.createGain();
+      hum.whine.gain.value = 0;
+      hum.whine.connect(hum.out);
+      hum.oscs = [[1, 'sine', 1], [3.02, 'triangle', 0.25]].map(function (h) {
+        var osc = audio.createOscillator();
+        var g = audio.createGain();
+        osc.type = h[1];
+        g.gain.value = h[2];
+        osc.connect(g);
+        g.connect(hum.whine);
+        osc.start();
+        return { osc: osc, ratio: h[0] };
+      });
+      // Road and wind: looping white noise through a low-pass filter.
+      var noise = audio.createBuffer(1, audio.sampleRate * 2, audio.sampleRate);
+      var data = noise.getChannelData(0);
+      for (var i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+      var src = audio.createBufferSource();
+      src.buffer = noise;
+      src.loop = true;
+      hum.filter = audio.createBiquadFilter();
+      hum.filter.type = 'lowpass';
+      hum.road = audio.createGain();
+      hum.road.gain.value = 0;
+      src.connect(hum.filter);
+      hum.filter.connect(hum.road);
+      hum.road.connect(hum.out);
+      src.start();
+    }
+    var t = audio.currentTime;
+    var v = Math.max(0, Number(state.speed) || 0);
+    var load = Math.max(Number(state.appliedThrottle) || 0, (Number(state.brake) || 0) * 0.5) / 100;
+    var moving = Math.min(1, v / 5);
+    var base = 55 + v * 4;  // 55 Hz creeping, about 455 Hz at 100 km/h
+    hum.oscs.forEach(function (o) { o.osc.frequency.setTargetAtTime(base * o.ratio, t, 0.08); });
+    hum.whine.gain.setTargetAtTime(moving * (0.025 + 0.06 * load), t, 0.1);
+    hum.road.gain.setTargetAtTime(Math.min(0.12, v / 900), t, 0.2);
+    hum.filter.frequency.setTargetAtTime(250 + v * 12, t, 0.2);
+    hum.out.gain.setTargetAtTime(state.speed === null ? 0 : 1, t, 0.3);
+  } catch (e) { /* no audio */ }
+}
+
+// The chime for a change of assist: ACC or autopilot coming on or going off
+// (to standby or off); plain cruise has none.
+var lastAssist = null;
+function assistChime(assist) {
+  if (lastAssist !== null && assist !== lastAssist) {
+    if (lastAssist === 'Autopilot') chime('autopilotOff');
+    else if (lastAssist === 'ACC') chime('accOff');
+    if (assist === 'Autopilot') chime('autopilotOn');
+    else if (assist === 'ACC') chime('accOn');
+  }
+  lastAssist = assist;
+}
+
+var stage = document.getElementById('stage');
+var frame = document.getElementById('frame');
+var topEl = document.getElementById('top');
+var tipSlot = document.getElementById('tipslot');
+var offline = document.getElementById('offline');
+var state = Object.assign({}, DEFAULTS);
+var shown = '';
+var shownTip = null;
+var heardTip = null;
+var mini = document.getElementById('mini');
+var miniLeft = document.getElementById('m-left');
+var miniCardsEl = document.getElementById('m-cards');
+var miniTip = document.getElementById('m-tip');
+var miniStatus = document.getElementById('m-status');
+var miniRoad = document.getElementById('m-road');
+var miniOver = document.getElementById('m-over');
+var shownMini = null;
+var shownRoad = null;
+
+function draw() {
+  assistChime(state.activeAssist);
+  updateHum();
+  if (state.activeAssist === 'Autopilot' && !autopilotSince) autopilotSince = Date.now();
+  if (state.activeAssist !== 'Autopilot') autopilotSince = 0;
+  if (state.activeAssist === 'ACC' && !accSince) accSince = Date.now();
+  if (state.activeAssist !== 'ACC') accSince = 0;
+  if (state.manual && !contextSince) contextSince = Date.now();
+  if (!state.manual) contextSince = 0;
+  frame.style.setProperty('--accent', state.accent);
+  mini.style.setProperty('--accent', state.accent);
+  var isMini = state.layout === 'minimal';
+  if (isMini !== shownMini) {
+    frame.style.display = isMini ? 'none' : '';
+    mini.style.display = isMini ? 'flex' : 'none';
+    shown = shownTip = shownRoad = null;
+    shownMini = isMini;
+  }
+  // The chime and the zones' pulse go with a new tip, not a layout swap.
+  var tipContent = state.showTip ? JSON.stringify(state.tip) : null;
+  if (tipContent !== heardTip) {
+    if (tipContent !== null) {
+      tipShownAt = Date.now();
+      chime(state.tip && (state.tip.complete || state.tip.score) ? 'tipDone' : 'tip');
+    }
+    heardTip = tipContent;
+  }
+  var tipKey = state.showTip ? tipContent
+    : 'idle' + JSON.stringify([state.manual, state.contextStatus, state.tipProgress, state.freeDrive]);
+  if (isMini) {
+    // The tip card is drawn only when the tip changes, so its animations run on.
+    var miniTipKey = state.showTip ? tipKey : '';
+    if (miniTipKey !== shownTip) {
+      miniTip.innerHTML = renderMiniTip(state);
+      shownTip = miniTipKey;
+    }
+    var html = renderMiniLeft(state) + '\u0000' + renderMiniCards(state) + '\u0000' + renderMiniStatus(state);
+    if (html !== shown) {
+      var parts = html.split('\u0000');
+      miniLeft.innerHTML = parts[0];
+      miniCardsEl.innerHTML = parts[1];
+      miniStatus.innerHTML = parts[2];
+      shown = html;
+    }
+    var road = renderMiniRoad(state);
+    if (road !== shownRoad) {
+      miniRoad.innerHTML = road;
+      shownRoad = road;
+    }
+    // While ACC or the autopilot drives, the lane view shows what it does:
+    // the cards go to the top, out of its way. Otherwise the lane view steps
+    // back while anything pops out over it.
+    var roadLive = !state.showTip && (state.activeAssist === 'ACC' || state.activeAssist === 'Autopilot');
+    miniOver.style.justifyContent = roadLive ? 'flex-start' : 'center';
+    miniRoad.style.opacity = roadLive || !(state.showTip || Object.keys(miniCards).length) ? '1' : '0.22';
+    return;
+  }
+  if (tipKey !== shownTip) {
+    tipSlot.innerHTML = renderTip(state);
+    shownTip = tipKey;
+  }
+  var html = render(state);
+  if (html !== shown) {
+    topEl.innerHTML = html;
+    shown = html;
+  }
+}
+
+function fit() {
+  var s = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+  stage.style.transform = 'scale(' + s + ') translate(-50%, -50%)';
+}
+
+window.addEventListener('resize', fit);
+fit();
+draw();
+// The minimal layout's cards pop back in on a timer, with or without new data.
+setInterval(function () { if (state.layout === 'minimal') draw(); }, 200);
+
+var events = new EventSource('events');
+events.onmessage = function (e) {
+  Object.assign(state, JSON.parse(e.data));
+  offline.style.display = 'none';
+  draw();
+};
+events.onerror = function () { offline.style.display = 'block'; };
+// Sent when the driver script exits.
+events.addEventListener('close', function () {
+  events.close();
+  window.close();
+});
+</script>
+</body>
+</html>
